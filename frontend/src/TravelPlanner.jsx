@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'https://travelagent-v2.onrender.com';
 
 export default function TravelPlanner() {
   // Store user inputs without overriding them
@@ -37,7 +38,8 @@ export default function TravelPlanner() {
     setHistoryLoading(true);
     setHistoryError(null);
     try {
-      const res = await fetch(`http://127.0.0.1:8000/api/v1/history/${formData.user_id}`);
+      // const res = await fetch(`http://127.0.0.1:8000/api/v1/history/${formData.user_id}`);
+      const res = await fetch(`${API_BASE}/api/v1/history/${formData.user_id}`);
       if (!res.ok) throw new Error(`Server returned status: ${res.status}`);
       const result = await res.json();
       if (result.status === 'Success') {
@@ -66,7 +68,8 @@ export default function TravelPlanner() {
     setError(null);
 
     try {
-      const res = await fetch('http://127.0.0.1:8000/api/v1/plan', {
+      // const res = await fetch('http://127.0.0.1:8000/api/v1/plan', {
+      const res = await fetch(`${API_BASE}/api/v1/plan`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -102,7 +105,8 @@ export default function TravelPlanner() {
     body.append('file', file);
 
     try {
-      const res = await fetch('http://127.0.0.1:8000/api/v1/ocr/passport', {
+      // const res = await fetch('http://127.0.0.1:8000/api/v1/ocr/passport', {
+      const res = await fetch(`${API_BASE}/api/v1/ocr/passport`, {
         method: 'POST',
         body: body
       });
