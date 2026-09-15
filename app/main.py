@@ -27,11 +27,11 @@ app = FastAPI(title="TravelAgent AI API", version="2.0")
 origins = [
     "https://travelagent-v2.vercel.app",
 ]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=origins,
+    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_credentials=True,  # Set to False unless sending cookies/sessions
     allow_methods=["*"],
     allow_headers=["*"],
 )
