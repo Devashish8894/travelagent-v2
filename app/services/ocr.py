@@ -52,8 +52,53 @@ def process_passport_image(file_source: str | bytes, mime_type: str = "image/jpe
         extracted = PassportData.model_validate_json(response.text)
         result_dict = extracted.model_dump()
         result_dict["is_valid"] = bool(extracted.passport_number or extracted.full_name)
-
         return result_dict
 
     except Exception as e:
-        return {"is_valid": False, "error": str(e)}
+        print(f"Gemini OCR failed: {e}")
+        try:
+            import anthropic
+            import base64
+            import json
+            claude_key = os.getenv("CLAUDE_API_KEY")
+            if not claude_key:
+                return {"is_valid": False, "error": str(e)}
+                
+            b64_image = base64.b64encode(file_bytes).decode("utf-8")
+            claude = anthropic.Anthropic(api_key=claude_key)
+            schema_json = PassportData.model_json_schema()
+            msg = claude.messages.create(
+                model="claude-3-haiku-20240307",
+                max_tokens=1024,
+                system=f"You are an OCR extractor. Output ONLY valid JSON matching this schema: {json.dumps(schema_json)}. Do not output markdown.",
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": mime_type,
+                                "data": b64_image
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": prompt
+                        }
+                    ]
+                }]
+            )
+            raw_text = msg.content[0].text.strip()
+            if raw_text.startswith("```"):
+                raw_text = raw_text.split("\n", 1)[1]
+                if raw_text.endswith("```"):
+                    raw_text = raw_text.rsplit("\n", 1)[0]
+                elif raw_text.endswith("```json"):
+                    raw_text = raw_text[:-7]
+            extracted = PassportData.model_validate_json(raw_text)
+            result_dict = extracted.model_dump()
+            result_dict["is_valid"] = bool(extracted.passport_number or extracted.full_name)
+            return result_dict
+        except Exception as claude_e:
+            return {"is_valid": False, "error": f"Claude fallback failed: {claude_e}"}

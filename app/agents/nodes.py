@@ -7,34 +7,15 @@ from pydantic import BaseModel, Field
 
 from app.agents.state import AgentState
 from app.db.vectordb import vector_db
-from app.tools.serp_tools import get_real_flights, get_real_hotels
-from app.tools.transit import (
-    GroundTransitInput,
-    search_buses_tool,
-    search_local_cabs_tool,
-    search_trains_tool,
-)
-from app.tools.flights import search_flights_tool, FlightInput
-from app.tools.hotels import search_hotels_tool, HotelInput
 
-DOMESTIC_AIRPORTS = {
-    "NAG", "BOM", "DEL", "BLR", "HYD", "MAA", "CCU", "GOI", "GOX", "PNQ", "COK", "AMD"
-}
-
-INTERNATIONAL_MAP = {
-    "london": "LHR", "dxb": "DXB", "dubai": "DXB", "singapore": "SIN", 
-    "bangkok": "BKK", "paris": "CDG", "new york": "JFK", "lhr": "LHR", 
-    "lax": "LAX", "los angeles": "LAX", "ch": "ZRH", "switzerland": "ZRH", "zurich": "ZRH", "geneva": "GVA"
-}
-
-# --- Pydantic Schemas for Structured LLM Outputs ---
+# --- Dynamic Structured Schemas ---
 
 class QueryExtraction(BaseModel):
-    destination: str = Field(description="Clean city name (e.g. Mumbai, London, Los Angeles, Zurich)")
-    origin_airport_code: str = Field(description="3-letter IATA origin code")
-    destination_airport_code: str = Field(description="3-letter IATA destination code")
+    destination: str = Field(description="Clean city destination name")
+    origin_airport_code: str = Field(description="3-letter IATA origin airport code")
+    destination_airport_code: str = Field(description="3-letter IATA destination airport code")
     duration_days: int = Field(default=3)
-    is_international: bool = Field(description="True ONLY if origin and destination are in different countries")
+    is_international: bool = Field(description="True if origin and destination are in different countries")
 
 class FlightSegment(BaseModel):
     airline: str
@@ -45,35 +26,73 @@ class FlightSegment(BaseModel):
     arrival_time: str
     departure_date: str
     arrival_date: str
-    layover_after: str = Field(default="", description="Layover duration and hub airport if connecting to another leg")
+    layover_after: str = Field(default="", description="Layover transit hub and duration if connecting; empty if direct non-stop")
     day_shift: str = Field(default="", description="e.g. '(Same Day)' or '(+1 Day)'")
 
 class DynamicFlightOption(BaseModel):
     airline: str
-    airline_logo: str
+    airline_logo: str = Field(default="", description="URL or placeholder for airline logo")
     flight_number: str
     departure_time: str
     arrival_time: str
     total_duration: str
     price_inr: float
+    is_direct: bool = Field(description="True if direct non-stop, False if connecting")
     segments: list[FlightSegment]
 
 class DynamicFlightList(BaseModel):
-    flights: list[DynamicFlightOption]
+    flights: list[DynamicFlightOption] = Field(description="Exactly 10 diverse, realistic airline flight choices")
+
+class DynamicHotelOption(BaseModel):
+    name: str
+    price_per_night: float
+    rating: float
+    image_url: str
+    link: str
+    amenities: str
+
+class DynamicHotelList(BaseModel):
+    hotels: list[DynamicHotelOption] = Field(description="Exactly 12 realistic hotel choices across budget to luxury")
+
+class DynamicTrainOption(BaseModel):
+    train_name: str
+    train_number: str
+    class_tier: str
+    departure_time: str
+    arrival_time: str
+    duration: str
+    total_price_inr: float
+
+class DynamicTrainList(BaseModel):
+    trains: list[DynamicTrainOption] = Field(description="Minimum 5 realistic train routes")
+
+class DynamicBusOption(BaseModel):
+    bus_operator: str
+    bus_type: str
+    departure_time: str
+    arrival_time: str
+    duration: str
+    total_price_inr: float
+
+class DynamicBusList(BaseModel):
+    buses: list[DynamicBusOption] = Field(description="Minimum 5 realistic bus routes")
 
 class CabOption(BaseModel):
-    service_name: str = Field(description="Name/Type of cab service (e.g., London Black Cab, Private Sightseeing Chauffeur)")
-    vehicle_type: str = Field(description="Type of car (e.g., Mercedes E-Class, Toyota Prius, EV SUV, Sedan, 7-Seater Van)")
-    daily_rate_inr: float = Field(description="Realistic daily rate in INR for this specific city/country")
-    inclusions: str = Field(description="Included perks like Airport transfer, Fuel, Tolls, English-speaking driver")
+    service_name: str
+    vehicle_type: str
+    daily_rate_inr: float
+    inclusions: str
+
+class DynamicCabList(BaseModel):
+    cabs: list[CabOption] = Field(description="Exactly 5 distinct options: 1. Sedan, 2. Green EV, 3. SUV, 4. Luxury Chauffeur, 5. Van")
 
 class DynamicCabResponse(BaseModel):
     selected_service: CabOption
-    alternative_services: list[CabOption] = Field(description="Exactly 4 distinct alternative vehicle/service classes")
+    alternative_services: list[CabOption] = Field(description="Exactly 4 distinct alternative services")
 
 class ItineraryResponse(BaseModel):
-    draft_itinerary: str = Field(description="Markdown itinerary")
-    calculated_cost_inr: float = Field(description="Total cost in INR")
+    draft_itinerary: str
+    calculated_cost_inr: float
 
 
 def _sanitize_time(time_val: str, default_time: str = "08:00") -> str:
@@ -88,75 +107,212 @@ def _sanitize_time(time_val: str, default_time: str = "08:00") -> str:
     return val_str[:5]
 
 
-def _generate_dynamic_connecting_flights(client: genai.Client, origin: str, dest: str, flight_date: str, direction: str, is_international: bool) -> list:
-    """Uses Gemini to dynamically generate realistic multi-leg or direct flight routes and schedules."""
-    prompt = (
-        f"Generate 5 realistic airline flight options for route {origin} to {dest} on date {flight_date}. "
-        f"Direction: {direction}. Is International: {is_international}. "
-        f"If this route typically requires a connection (e.g. BOM to LAX or Europe), provide realistic 2-leg connecting segments with major hub layovers (e.g., AUH, LHR, CDG, DOH, HKG). "
-        f"Provide real carrier names (e.g., Etihad, Emirates, Qatar, British Airways, Air India, etc.), approximate flight numbers, realistic total durations (20h+ for transcontinental), and authentic current market prices in INR (single ticket covering both legs). "
-        f"Ensure departure times are clean HH:MM."
-    )
+import time
+
+def _call_gemini_structured(client: genai.Client, prompt: str, schema_class):
+    """Reliably calls Gemini Flash with fallbacks to ensure zero hardcoded crash."""
+    import anthropic
+    import json
+    
+    for model_name in ["gemini-3.5-flash-lite", "gemini-3.1-pro", "gemini-3.8-flash"]:
+        for attempt in range(2):
+            try:
+                res = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=schema_class,
+                    ),
+                )
+                return schema_class.model_validate_json(res.text)
+            except Exception as e:
+                print(f"Error calling {model_name} (Attempt {attempt+1}): {e}")
+                time.sleep(2)
+                continue
+                
+    # Fallback to Claude API
+    print("Falling back to Claude API...")
     try:
-        res = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=DynamicFlightList,
-            ),
-        )
-        parsed = DynamicFlightList.model_validate_json(res.text)
-        out = []
-        for f in parsed.flights:
-            f_dict = f.model_dump()
-            f_dict["direction"] = direction
-            f_dict["trip_direction"] = direction
-            f_dict["flight_date"] = flight_date
-            f_dict["departure_time"] = f"{flight_date} {_sanitize_time(f.departure_time)}"
-            f_dict["arrival_time"] = f"{flight_date} {_sanitize_time(f.arrival_time)}"
-            out.append(f_dict)
-        return out
+        claude_key = os.getenv("CLAUDE_API_KEY")
+        if claude_key:
+            claude = anthropic.Anthropic(api_key=claude_key)
+            schema_json = schema_class.model_json_schema()
+            msg = claude.messages.create(
+                model="claude-3-haiku-20240307",
+                max_tokens=2048,
+                system=f"You are a structured data extractor. You must output ONLY raw, valid JSON matching this schema: {json.dumps(schema_json)}. Do not include markdown blocks or any other text.",
+                messages=[{"role": "user", "content": prompt}]
+            )
+            raw_text = msg.content[0].text.strip()
+            # Remove any markdown formatting if present
+            if raw_text.startswith("```"):
+                raw_text = raw_text.split("\n", 1)[1]
+                if raw_text.endswith("```"):
+                    raw_text = raw_text.rsplit("\n", 1)[0]
+                elif raw_text.endswith("```json"):
+                    raw_text = raw_text[:-7]
+            return schema_class.model_validate_json(raw_text)
     except Exception as e:
-        print(f"Dynamic Flight Generation Error: {e}")
-        # Dynamic heuristic fallback if API call fails
-        hub = "AUH" if is_international else origin
-        return [{
-            "airline": "Etihad Airways" if is_international else "IndiGo",
-            "airline_logo": "https://www.gstatic.com/flights/airline_logos/70px/EY.png" if is_international else "https://placehold.co/48x48?text=6E",
-            "flight_number": "EY 207 / EY 171" if is_international else "6E 101",
-            "departure_time": f"{flight_date} 05:00",
-            "arrival_time": f"{flight_date} 16:45",
-            "total_duration": "22h 15m" if is_international else "2h 15m",
-            "price_inr": 92435.0 if is_international else 5500.0,
-            "direction": direction,
-            "trip_direction": direction,
-            "flight_date": flight_date,
-            "segments": [
-                {
-                    "airline": "Etihad Airways" if is_international else "IndiGo",
-                    "flight_number": "EY 207" if is_international else "6E 101",
-                    "from_code": origin,
-                    "to_code": hub if is_international else dest,
-                    "departure_time": "05:00",
-                    "arrival_time": "06:30" if is_international else "07:15",
-                    "departure_date": flight_date,
-                    "arrival_date": flight_date,
-                    "layover_after": "3h 45m (Transit & Security Clearance)" if is_international else ""
-                },
-                {
-                    "airline": "Etihad Airways",
-                    "flight_number": "EY 171",
-                    "from_code": hub,
-                    "to_code": dest,
-                    "departure_time": "10:15",
-                    "arrival_time": "16:45",
-                    "departure_date": flight_date,
-                    "arrival_date": flight_date,
-                    "day_shift": "(Same Day)"
-                }
-            ] if is_international else []
-        }]
+        print(f"Claude fallback failed: {e}")
+        
+    return None
+
+
+import random
+
+def _generate_dynamic_flights(client: genai.Client, origin: str, dest: str, flight_date: str, direction: str, is_international: bool) -> list:
+    spec = (
+        f"This is an INTERNATIONAL flight route between {origin} and {dest}. Generate exactly 10 distinct airline options. "
+        f"Use a variety of real international carriers (e.g. Emirates, British Airways, Air India, Qatar Airways, Lufthansa, Singapore Airlines, etc.). "
+        f"CRITICAL: You MUST include BOTH Direct Non-Stop flights (if they exist) and Connecting flights. "
+        f"For connecting flights, the transit hub MUST be dynamically chosen based on the airline (e.g. DXB for Emirates, DOH for Qatar Airways). "
+        f"ALL connecting records MUST include realistic connecting flight details (multiple segments)."
+        if is_international
+        else
+        f"This is a DOMESTIC flight route inside India between {origin} and {dest}. Generate exactly 10 distinct flight options. "
+        f"Use active Indian domestic carriers (IndiGo, Air India, Akasa Air, Vistara, SpiceJet). "
+        f"Provide at least 5-6 DIRECT NON-STOP flights (single segment) and 4-5 connecting flights via DEL/BOM/BLR."
+    )
+    prompt = (
+        f"Generate exactly 10 realistic, completely distinct flight options for route {origin} to {dest} on date {flight_date}.\n"
+        f"Direction: {direction}. Is International: {is_international}.\n{spec}\n"
+        f"Set realistic total_duration, realistic current market prices in INR, and clean HH:MM departure/arrival times."
+    )
+    
+    parsed = _call_gemini_structured(client, prompt, DynamicFlightList)
+    out = []
+    
+    if not parsed or not parsed.flights:
+        # Fallback Mock Data for 429 Quota Exceeded
+        airlines = ["Emirates", "British Airways", "Air India", "Qatar Airways", "Lufthansa"] if is_international else ["IndiGo", "Vistara", "Air India", "SpiceJet", "Akasa Air"]
+        hubs = ["DXB", "LHR", "DEL", "DOH", "FRA"] if is_international else ["DEL", "BOM", "BLR", "HYD", "MAA"]
+        
+        flights_data = []
+        for i in range(10):
+            airline = random.choice(airlines)
+            hub = random.choice(hubs)
+            is_direct = random.choice([True, False])
+            segments = []
+            if is_direct:
+                segments.append(FlightSegment(airline=airline, flight_number=f"{airline[:2].upper()}{random.randint(100, 999)}", from_code=origin, to_code=dest, departure_time="10:00", arrival_time="14:00", departure_date=flight_date, arrival_date=flight_date, layover_after="", day_shift=""))
+            else:
+                segments.append(FlightSegment(airline=airline, flight_number=f"{airline[:2].upper()}{random.randint(100, 999)}", from_code=origin, to_code=hub, departure_time="08:00", arrival_time="11:00", departure_date=flight_date, arrival_date=flight_date, layover_after=f"{hub} 2h 30m", day_shift=""))
+                segments.append(FlightSegment(airline=airline, flight_number=f"{airline[:2].upper()}{random.randint(100, 999)}", from_code=hub, to_code=dest, departure_time="13:30", arrival_time="18:00", departure_date=flight_date, arrival_date=flight_date, layover_after="", day_shift=""))
+                
+            flights_data.append(DynamicFlightOption(
+                airline=airline,
+                airline_logo="",
+                flight_number=f"{airline[:2].upper()}{random.randint(100, 999)}",
+                departure_time="10:00" if is_direct else "08:00",
+                arrival_time="14:00" if is_direct else "18:00",
+                total_duration="4h 00m" if is_direct else "10h 00m",
+                price_inr=random.randint(25000, 85000) if is_international else random.randint(4000, 15000),
+                is_direct=is_direct,
+                segments=segments
+            ))
+        parsed = DynamicFlightList(flights=flights_data)
+
+    for f in parsed.flights:
+        fd = f.model_dump()
+        fd["direction"] = direction
+        fd["trip_direction"] = direction
+        fd["flight_date"] = flight_date
+        fd["departure_time"] = f"{flight_date} {_sanitize_time(f.departure_time)}"
+        fd["arrival_time"] = f"{flight_date} {_sanitize_time(f.arrival_time)}"
+        out.append(fd)
+    return out
+
+
+def _generate_dynamic_hotels(client: genai.Client, destination: str, check_in: str, check_out: str) -> list:
+    prompt = (
+        f"Generate exactly 12 realistic hotel accommodations located in {destination} from {check_in} to {check_out}.\n"
+        f"Provide a diverse selection across 3-star budget, 4-star boutique, business executive, and 5-star luxury hotels.\n"
+        f"Include realistic per-night prices in INR, review ratings between 3.8 and 4.9, valid amenities, and clean Unsplash hotel image URLs."
+    )
+    parsed = _call_gemini_structured(client, prompt, DynamicHotelList)
+    if not parsed or not parsed.hotels:
+        hotel_data = []
+        names = ["Grand Hyatt", "Taj Mahal Palace", "ITC Maurya", "The Leela", "Marriott", "Hilton", "Radisson Blu", "Holiday Inn"]
+        for i in range(12):
+            hotel_data.append(DynamicHotelOption(
+                name=f"{random.choice(names)} {destination} {i+1}",
+                rating=round(random.uniform(3.8, 4.9), 1),
+                price_per_night=float(random.randint(4000, 35000)),
+                amenities="Free WiFi, Pool, Spa, Breakfast Included",
+                link="https://www.google.com/search?q=hotel",
+                image_url="https://images.unsplash.com/photo-1566073771259-6a8506099945?ixlib=rb-4.0.3&auto=format&fit=crop&w=800&q=80"
+            ))
+        parsed = DynamicHotelList(hotels=hotel_data)
+        
+    if parsed and parsed.hotels:
+        return [h.model_dump() for h in parsed.hotels]
+    return []
+
+
+def _generate_dynamic_transit(client: genai.Client, origin: str, dest: str, travel_date: str) -> tuple[list, list]:
+    prompt = (
+        f"Generate at least 5 realistic Indian Railways trains (Vande Bharat, Rajdhani, Superfast Express) and "
+        f"at least 5 intercity bus operators from {origin} to {dest} on {travel_date}.\n"
+        f"Provide realistic schedule times, durations, class tiers, and INR pricing."
+    )
+    class TransitCombined(BaseModel):
+        trains: list[DynamicTrainOption]
+        buses: list[DynamicBusOption]
+
+    parsed = _call_gemini_structured(client, prompt, TransitCombined)
+    if not parsed:
+        trains = []
+        buses = []
+        for i in range(5):
+            trains.append(DynamicTrainOption(
+                train_name=f"{random.choice(['Vande Bharat', 'Rajdhani', 'Shatabdi'])} Express",
+                train_number=f"{random.randint(11000, 22000)}",
+                departure_time="06:00", arrival_time="14:00", duration="8h",
+                class_tier="3A", total_price_inr=float(random.randint(1500, 4500))
+            ))
+            buses.append(DynamicBusOption(
+                bus_operator=f"{random.choice(['Volvo', 'Zingbus', 'IntrCity'])} Travels",
+                bus_type="AC Sleeper",
+                departure_time="21:00", arrival_time="06:00", duration="9h",
+                total_price_inr=float(random.randint(800, 2500))
+            ))
+        parsed = TransitCombined(trains=trains, buses=buses)
+        
+    if parsed:
+        return [t.model_dump() for t in parsed.trains], [b.model_dump() for b in parsed.buses]
+    return [], []
+
+
+def _generate_dynamic_cabs(client: genai.Client, destination: str, days: int, is_international: bool) -> list:
+    prompt = (
+        f"Generate exactly 5 distinct cab, taxi, and chauffeur rental packages for a traveler visiting {destination} for {days} days.\n"
+        f"Is International destination: {is_international}.\n"
+        f"Include exactly 5 classes: 1. Standard City Sedan, 2. Eco EV Chauffeur, 3. Premium Family SUV, 4. VIP Luxury Chauffeur, 5. 7-Seater Passenger Van.\n"
+        f"Provide authentic service names, vehicle models, realistic daily rates converted to INR, and inclusions."
+    )
+    parsed = _call_gemini_structured(client, prompt, DynamicCabList)
+    out = []
+    
+    if not parsed or not parsed.cabs:
+        cab_data = []
+        classes = ["Standard City Sedan", "Eco EV Chauffeur", "Premium Family SUV", "VIP Luxury Chauffeur", "7-Seater Passenger Van"]
+        for idx, cname in enumerate(classes):
+            cab_data.append(CabOption(
+                service_name=cname,
+                vehicle_type="Toyota Camry" if idx==0 else "Tesla Model 3" if idx==1 else "Toyota Fortuner" if idx==2 else "Mercedes Benz S-Class" if idx==3 else "Toyota Innova",
+                daily_rate_inr=float(random.randint(2500, 15000)),
+                inclusions="8 Hours, 80 Kms, Driver Allowance"
+            ))
+        parsed = DynamicCabList(cabs=cab_data)
+        
+    if parsed and parsed.cabs:
+        for idx, c in enumerate(parsed.cabs):
+            cd = c.model_dump()
+            cd["total_cab_cost_inr"] = cd["daily_rate_inr"] * days
+            cd["is_recommended"] = (idx == 0)
+            out.append(cd)
+    return out
 
 
 def retrieve_context_node(state: AgentState) -> dict:
@@ -173,12 +329,19 @@ def execution_node(state: AgentState) -> dict:
     user_query = state.get("user_input", "")
     total_budget_inr = float(state.get("total_budget_inr", 0.0) or state.get("budget_inr", 0.0))
 
-    origin = state.get("origin", "BOM").strip().upper()
-    destination_name = state.get("destination", "LAX").strip()
-    duration_days = int(state.get("duration_days", 3))
-    trip_type = state.get("trip_type", "round_trip")
+    origin_val = state.get("origin")
+    if not origin_val:
+        origin_val = "BOM"
+    origin = origin_val.strip().upper()
     
-    # 1. Date Calculations
+    dest_val = state.get("destination")
+    if not dest_val:
+        dest_val = "LHR"
+    destination_name = dest_val.strip()
+
+    duration_days = int(state.get("duration_days") or 3)
+    trip_type = state.get("trip_type") or "round_trip"
+
     from_date = state.get("from_date")
     to_date = state.get("to_date")
     today = datetime.date.today()
@@ -200,50 +363,27 @@ def execution_node(state: AgentState) -> dict:
 
     nights = max(1, duration_days - 1)
 
-    dest_lower = destination_name.lower()
-    if dest_lower in INTERNATIONAL_MAP:
-        airport_code = INTERNATIONAL_MAP[dest_lower]
-        is_international = True
-    elif "lax" in dest_lower or "los angeles" in dest_lower:
-        airport_code = "LAX"
-        is_international = True
-    elif "bom" in dest_lower or "mumbai" in dest_lower:
-        airport_code = "BOM"
-        is_international = False
-    elif "goa" in dest_lower or "goi" in dest_lower:
-        airport_code = "GOI"
-        is_international = False
-    else:
-        airport_code = "DEL"
-        is_international = False
-
-    passport_data = state.get("passport_data") or {}
-    passport_verified = state.get("passport_verified", False) or bool(passport_data.get("passport_number"))
-
-    # 2. Dynamic Route Verification with Gemini
+    # 1. Dynamic Route Extraction
+    airport_code = destination_name[:3].upper() if destination_name else "LHR"
+    is_international = True
     if client:
-        try:
-            prompt = f"Determine origin/dest 3-letter IATA airport codes and whether route is international: Origin '{origin}', Destination '{destination_name}', User query: '{user_query}'."
-            extraction_res = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=QueryExtraction,
-                ),
-            )
-            extracted = QueryExtraction.model_validate_json(extraction_res.text)
+        prompt = (
+            f"Extract origin 3-letter IATA code, destination 3-letter IATA code, and clean destination city name. "
+            f"CRITICAL: determine the country of the Origin airport, and the country of the Destination airport. "
+            f"Set boolean is_international to True ONLY if the origin and destination are in DIFFERENT countries. "
+            f"Origin: '{origin}', Destination: '{destination_name}', User query: '{user_query}'."
+        )
+        extracted = _call_gemini_structured(client, prompt, QueryExtraction)
+        if extracted:
             origin = extracted.origin_airport_code.upper() or origin
             airport_code = extracted.destination_airport_code.upper() or airport_code
             destination_name = extracted.destination or destination_name
             is_international = extracted.is_international
-        except Exception:
-            if origin in DOMESTIC_AIRPORTS and airport_code in DOMESTIC_AIRPORTS:
-                is_international = False
-            else:
-                is_international = (origin not in DOMESTIC_AIRPORTS) or (airport_code not in DOMESTIC_AIRPORTS)
 
-    # 3. OCR GATE: Block international routes until verified
+    # OCR Gate
+    passport_data = state.get("passport_data") or {}
+    passport_verified = state.get("passport_verified", False) or bool(passport_data.get("passport_number"))
+
     if is_international and not passport_verified:
         return {
             "status": "pending_verification",
@@ -252,146 +392,32 @@ def execution_node(state: AgentState) -> dict:
             "passport_verified": False,
             "passport_details": {},
             "flight_options": [],
+            "hotels_options": [],
             "train_options": [],
             "bus_options": [],
-            "local_cab": {},
-            "hotels_options": [],
+            "cabs_options": [],
+            "local_cabs": [],
             "draft_itinerary": "Passport OCR Verification Required.",
             "calculated_cost_inr": 0.0,
             "budget_sufficient": False,
-            "breakdown": {
-                "flights": [],
-                "hotels": [],
-                "trains": [],
-                "buses": [],
-                "local_cabs": {}
-            }
         }
 
-    # 4. Fetch Outbound & Return Flights Dynamically
+    # 2. Dynamic Flights (5+ Outbound, 5+ Return)
     flights = []
-    
-    # Try real live search tool first
-    raw_outbound = get_real_flights(origin=origin, destination=airport_code, date=from_date, limit=5)
-    
-    # If it is an intercontinental route or tool returned limited leg data, generate dynamic multi-segment connecting flights
-    if is_international and client:
-        outbound_flights = _generate_dynamic_connecting_flights(client, origin, airport_code, from_date, "outbound", is_international)
-        return_flights = _generate_dynamic_connecting_flights(client, airport_code, origin, to_date, "return", is_international) if trip_type == "round_trip" else []
-        flights = outbound_flights + return_flights
-    elif raw_outbound:
-        for idx, f in enumerate(raw_outbound[:10]):
-            dep = _sanitize_time(f.get("departure_time") or f.get("departure"), "06:00")
-            arr = _sanitize_time(f.get("arrival_time"), "08:15")
-            flights.append({
-                "airline": f.get("airline", "IndiGo"),
-                "airline_logo": f.get("airline_logo") or "https://placehold.co/48x48?text=Flight",
-                "flight_number": f.get("flight_no") or f.get("flight_number") or f"OB-{101 + idx}",
-                "departure_time": f"{from_date} {dep}",
-                "arrival_time": f"{from_date} {arr}",
-                "total_duration": "2h 15m",
-                "price_inr": float(f.get("price_inr") or 5500.0),
-                "direction": "outbound",
-                "trip_direction": "outbound",
-                "flight_date": from_date,
-                "segments": [
-                    {
-                        "airline": f.get("airline", "IndiGo"),
-                        "flight_number": f.get("flight_no") or f"OB-{101 + idx}",
-                        "from_code": origin,
-                        "to_code": airport_code,
-                        "departure_time": dep,
-                        "arrival_time": arr,
-                        "departure_date": from_date,
-                        "arrival_date": from_date
-                    }
-                ]
-            })
+    if client:
+        outbound = _generate_dynamic_flights(client, origin, airport_code, from_date, "outbound", is_international)
+        returns = _generate_dynamic_flights(client, airport_code, origin, to_date, "return", is_international) if trip_type == "round_trip" else []
+        flights = outbound + returns
 
-        if trip_type == "round_trip":
-            raw_return = get_real_flights(origin=airport_code, destination=origin, date=to_date, limit=10) or raw_outbound
-            for idx, f in enumerate(raw_return[:10]):
-                dep = _sanitize_time(f.get("departure_time") or f.get("departure"), "17:30")
-                arr = _sanitize_time(f.get("arrival_time"), "19:45")
-                flights.append({
-                    "airline": f.get("airline", "IndiGo"),
-                    "airline_logo": f.get("airline_logo") or "https://placehold.co/48x48?text=Flight",
-                    "flight_number": f"RT-{f.get('flight_no') or (201 + idx)}",
-                    "departure_time": f"{to_date} {dep}",
-                    "arrival_time": f"{to_date} {arr}",
-                    "total_duration": "2h 15m",
-                    "price_inr": float(f.get("price_inr") or 5500.0),
-                    "direction": "return",
-                    "trip_direction": "return",
-                    "flight_date": to_date,
-                    "segments": [
-                        {
-                            "airline": f.get("airline", "IndiGo"),
-                            "flight_number": f"RT-{f.get('flight_no') or (201 + idx)}",
-                            "from_code": airport_code,
-                            "to_code": origin,
-                            "departure_time": dep,
-                            "arrival_time": arr,
-                            "departure_date": to_date,
-                            "arrival_date": to_date
-                        }
-                    ]
-                })
-    else:
-        # Fallback to dynamic tool
-        mock_flights = search_flights_tool(FlightInput(origin=origin, destination=airport_code, date=from_date)).get("flights", [])
-        for idx, f in enumerate(mock_flights):
-            flights.append({
-                "airline": f.get("airline", "Airline"),
-                "airline_logo": f.get("airline_logo", "https://placehold.co/48x48?text=Flight"),
-                "flight_number": f.get("flight_no", f"FL-{idx+1}"),
-                "departure_time": f"{from_date} 08:00",
-                "arrival_time": f"{from_date} 10:30",
-                "total_duration": "2h 30m",
-                "price_inr": float(f.get("price_inr") or 6000.0),
-                "direction": "outbound",
-                "trip_direction": "outbound",
-                "flight_date": from_date,
-                "segments": []
-            })
+    # 3. Dynamic Hotels (12 Options)
+    hotels = _generate_dynamic_hotels(client, destination_name, from_date, to_date) if client else []
 
-    # 5. Fetch Hotels (SerpAPI with dynamic fallback)
-    raw_hotels = get_real_hotels(location=destination_name, check_in=from_date, check_out=to_date, limit=10)
-    hotels = []
-    if raw_hotels:
-        for h in raw_hotels:
-            hotels.append({
-                "name": h.get("name"),
-                "price_per_night": float(h.get("price_per_night", 12500.0 if is_international else 4500.0)),
-                "rating": h.get("rating", 4.3),
-                "image_url": h.get("image_url") or "https://images.unsplash.com/photo-1566073771259-6a8506099945?w=500&auto=format&fit=crop&q=60",
-                "link": h.get("link", "#"),
-            })
-    else:
-        fallback_hotel_price = 13500.0 if is_international else 4200.0
-        mock_hotels = search_hotels_tool(HotelInput(location=destination_name, max_price_inr=25000.0))
-        for h in mock_hotels.get("hotels", []):
-            hotels.append({
-                "name": h.get("name"),
-                "price_per_night": float(h.get("price_per_night") or fallback_hotel_price),
-                "rating": h.get("rating", 4.2),
-                "image_url": "https://images.unsplash.com/photo-1566073771259-6a8506099945?w=500&auto=format&fit=crop&q=60",
-                "link": "#",
-            })
+    # 4. Dynamic Transit (Trains & Buses)
+    trains, buses = [], []
+    if not is_international and client:
+        trains, buses = _generate_dynamic_transit(client, origin, destination_name, from_date)
 
-    # 6. Ground Transit (Domestic Only)
-    trains, buses = {"trains": []}, {"buses": []}
-    if not is_international:
-        transit_payload = GroundTransitInput(
-            origin=origin,
-            destination=destination_name,
-            trip_type=trip_type,
-            travel_date=from_date
-        )
-        trains = search_trains_tool(transit_payload)
-        buses = search_buses_tool(transit_payload)
-
-    # 7. Dynamic 5-Cab Option Generation via Gemini
+    # 5. Dynamic 5-Cab Option Generation via Gemini
     local_cabs = {}
     if client and state.get("include_local_cab", True):
         try:
@@ -448,55 +474,44 @@ def execution_node(state: AgentState) -> dict:
                 ]
             }
 
-    # 8. Lowest Price Calculation per tab
+    # 6. Exact Lowest Combined Cost Calculation
     cheapest_outbound = min([f["price_inr"] for f in flights if f.get("direction") == "outbound"], default=0.0)
     cheapest_return = min([f["price_inr"] for f in flights if f.get("direction") == "return"], default=0.0)
     flight_cost = cheapest_outbound + (cheapest_return if trip_type == "round_trip" else 0.0)
 
     cheapest_hotel = min([h["price_per_night"] for h in hotels], default=0.0)
     hotel_cost = cheapest_hotel * nights
-    cab_cost = local_cabs.get("total_cab_cost_inr", 0.0) if state.get("include_local_cab", True) else 0.0
-    total_calculated_cost = float(flight_cost + hotel_cost + cab_cost)
+
+    # Calculate cheapest cab from the local_cabs dictionary
+    cabs_list = []
+    if local_cabs:
+        cabs_list.append(local_cabs)
+        cabs_list.extend(local_cabs.get("alternatives", []))
+    cheapest_cab = min([c.get("total_cab_cost_inr", 0) for c in cabs_list], default=0.0)
+    total_calculated_cost = float(flight_cost + hotel_cost + cheapest_cab)
 
     budget_sufficient = total_budget_inr >= total_calculated_cost
 
-    # 9. Dynamic Markdown Itinerary
+    # 7. Itinerary Generation
+    itinerary_text = ""
     if not budget_sufficient:
         itinerary_text = (
             f"## ⚠️ Insufficient Budget Alert\n\n"
             f"- **Estimated Budget Required:** ₹{total_calculated_cost:,.2f}\n"
             f"- **Your Specified Budget:** ₹{total_budget_inr:,.2f}\n"
             f"- **Shortfall:** ₹{(total_calculated_cost - total_budget_inr):,.2f}\n\n"
-            f"> Please click **Update Budget** above to view and unlock booking options for this package."
+            f"> Click **Match Budget** above to review and reserve this package."
         )
-    else:
-        itinerary_text = (
-            f"# {duration_days}-Day Trip to {destination_name}\n\n"
-            f"- **Dates:** {from_date} to {to_date}\n"
-            f"- **Outbound Connecting Flight:** ₹{cheapest_outbound:,.2f} (Single ticket including transit)\n"
-            f"- **Return Connecting Flight:** ₹{cheapest_return:,.2f} (Single ticket including transit)\n"
-            f"- **Hotel ({nights} Nights):** ₹{hotel_cost:,.2f}\n"
-            f"- **Chauffeur Sightseeing:** ₹{cab_cost:,.2f}\n\n"
-            f"Your budget of ₹{total_budget_inr:,.2f} covers this estimated trip cost of ₹{total_calculated_cost:,.2f}."
+    elif client:
+        itinerary_prompt = (
+            f"Create a detailed day-by-day markdown itinerary for a {duration_days}-day trip to {destination_name} ({from_date} to {to_date}).\n"
+            f"Calculated package budget: ₹{total_calculated_cost:,.2f}. User preferences: {user_query}."
         )
-        if client:
-            try:
-                prompt = (
-                    f"Create a detailed day-by-day itinerary for {duration_days} days in {destination_name}. "
-                    f"Dates: {from_date} to {to_date}. Budget INR: {total_calculated_cost}. User preferences: {user_query}"
-                )
-                response = client.models.generate_content(
-                    model="gemini-2.5-flash",
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=ItineraryResponse,
-                    ),
-                )
-                parsed = ItineraryResponse.model_validate_json(response.text)
-                itinerary_text = parsed.draft_itinerary
-            except Exception:
-                pass
+        it_res = _call_gemini_structured(client, itinerary_prompt, ItineraryResponse)
+        if it_res:
+            itinerary_text = it_res.draft_itinerary
+        else:
+            itinerary_text = f"# {duration_days}-Day Trip to {destination_name}\n\nPackage Cost: ₹{total_calculated_cost:,.2f}"
 
     return {
         "status": "Success",
@@ -512,10 +527,12 @@ def execution_node(state: AgentState) -> dict:
         "passport_verified": passport_verified,
         "passport_details": passport_data,
         "flight_options": flights,
-        "train_options": trains.get("trains", []),
-        "bus_options": buses.get("buses", []),
-        "local_cab": local_cabs,
         "hotels_options": hotels,
+        "train_options": trains,
+        "bus_options": buses,
+        "cabs_options": [],
+        "local_cabs": local_cabs,
+        "local_cab": local_cabs,
         "draft_itinerary": itinerary_text,
         "itinerary": itinerary_text,
         "calculated_cost_inr": total_calculated_cost,
@@ -524,8 +541,8 @@ def execution_node(state: AgentState) -> dict:
         "breakdown": {
             "flights": flights,
             "hotels": hotels,
-            "trains": trains.get("trains", []),
-            "buses": buses.get("buses", []),
-            "local_cabs": local_cabs,
-        }
+            "trains": trains,
+            "buses": buses,
+            "cabs": local_cabs,
+        },
     }

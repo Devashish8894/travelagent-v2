@@ -106,7 +106,15 @@ async def generative_plan(req: PlanRequest):
     itinerary = result.get("draft_itinerary", "")
     estimated_cost = result.get("calculated_cost_inr", 0.0)
 
-    save_chat(req.user_id, req.prompt, itinerary, estimated_cost)
+    save_chat(
+        user_id=req.user_id,
+        origin=result.get("origin", req.origin),
+        destination=result.get("destination", req.destination),
+        from_date=result.get("from_date", req.from_date),
+        to_date=result.get("to_date", req.to_date),
+        duration_days=result.get("duration_days", req.duration_days),
+        cost=estimated_cost
+    )
 
     # In main.py generative_plan response:
     return {
@@ -121,6 +129,7 @@ async def generative_plan(req: PlanRequest):
             "flights": result.get("flight_options", []),
             "trains": result.get("train_options", []),
             "buses": result.get("bus_options", []),
+            "cabs": result.get("local_cab", {}),
             "local_cabs": result.get("local_cab", {}),
             "hotels": result.get("hotels_options", []), # Standardized to hotels_options
         },

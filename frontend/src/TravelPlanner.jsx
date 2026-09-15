@@ -2,14 +2,13 @@ import React, { useState, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'https://travelagent-v2.onrender.com';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
-// Safe time extractor: isolates HH:MM without crashing on null/undefined
 const extractTime = (timeStr) => {
   if (!timeStr || typeof timeStr !== 'string') return '12:00';
   if (timeStr.includes('T')) {
-    const timePart = timeStr.split('T')[1];
-    return timePart ? timePart.slice(0, 5) : '12:00';
+    const p = timeStr.split('T')[1];
+    return p ? p.slice(0, 5) : '12:00';
   }
   if (timeStr.includes(' ')) {
     const parts = timeStr.trim().split(/\s+/);
@@ -20,14 +19,14 @@ const extractTime = (timeStr) => {
 
 export default function TravelPlanner() {
   const [formData, setFormData] = useState({
-    user_id: 'usr_dev_01',
+    user_id: '',
     prompt: '',
-    origin: 'BOM',
-    destination: 'LAX',
-    from_date: '2026-09-28',
-    to_date: '2026-09-30',
-    budget_inr: '450000',
-    duration_days: '3',
+    origin: '',
+    destination: '',
+    from_date: '',
+    to_date: '',
+    budget_inr: '',
+    duration_days: '',
     trip_type: 'round_trip',
     include_local_cab: true,
     passport_verified: false,
@@ -42,7 +41,6 @@ export default function TravelPlanner() {
   const [ocrData, setOcrData] = useState(null);
   const [ocrError, setOcrError] = useState(null);
 
-  // History State
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState(null);
@@ -52,49 +50,35 @@ export default function TravelPlanner() {
     setHistoryError(null);
     try {
       const res = await fetch(`${API_BASE}/api/v1/history/${formData.user_id}`);
-      if (!res.ok) throw new Error(`Server returned status: ${res.status}`);
+      if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
       const result = await res.json();
-      if (result.status === 'Success') {
-        setHistory(result.history || []);
-      }
+      if (result.status === 'Success') setHistory(result.history || []);
     } catch (err) {
-      setHistoryError(err.message || 'Failed to fetch history.');
+      setHistoryError(err.message || 'Failed to fetch search history.');
     } finally {
       setHistoryLoading(false);
     }
   };
 
   const handleInputChange = (e) => {
-    const target = e.target;
-    const name = target.name;
-    const value = target.value;
-    const isCheckbox = target.type === 'checkbox';
-    const val = isCheckbox ? target.checked : value;
+    const { name, value, type, checked } = e.target;
+    const val = type === 'checkbox' ? checked : value;
 
-    setFormData(prev => {
+    setFormData((prev) => {
       const updated = { ...prev, [name]: val };
-
       if (name === 'from_date' || name === 'to_date') {
         const from = name === 'from_date' ? value : prev.from_date;
         const to = name === 'to_date' ? value : prev.to_date;
-
         if (from && to) {
-          const startDate = new Date(from);
-          const endDate = new Date(to);
-          const diffTime = endDate.getTime() - startDate.getTime();
-          const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
-          if (diffDays > 0) {
-            updated.duration_days = diffDays.toString();
-          }
+          const diffDays = Math.ceil((new Date(to) - new Date(from)) / (1000 * 60 * 60 * 24)) + 1;
+          if (diffDays > 0) updated.duration_days = diffDays.toString();
         }
       }
-
       if (name === 'duration_days' && prev.from_date && Number(value) > 0) {
-        const startDate = new Date(prev.from_date);
-        startDate.setDate(startDate.getDate() + (parseInt(value, 10) - 1));
-        updated.to_date = startDate.toISOString().split('T')[0];
+        const d = new Date(prev.from_date);
+        d.setDate(d.getDate() + (parseInt(value, 10) - 1));
+        updated.to_date = d.toISOString().split('T')[0];
       }
-
       return updated;
     });
   };
@@ -103,7 +87,6 @@ export default function TravelPlanner() {
     e.preventDefault();
     setLoading(true);
     setError(null);
-
     try {
       const res = await fetch(`${API_BASE}/api/v1/plan`, {
         method: 'POST',
@@ -114,104 +97,128 @@ export default function TravelPlanner() {
           duration_days: parseInt(formData.duration_days, 10) || 1
         })
       });
-
-      if (!res.ok) throw new Error(`Server returned status code: ${res.status}`);
+      if (!res.ok) throw new Error(`Server returned HTTP ${res.status}`);
       const result = await res.json();
       setData(result);
-
-      if (result.budget_sufficient === false) {
-        setActiveTab('itinerary');
-      }
+      if (result.budget_sufficient === false) setActiveTab('itinerary');
     } catch (err) {
       setError(err.message || 'Error communicating with AI service.');
     } finally {
       setLoading(false);
     }
   };
-
+  
+  const handleUpdateBudgetAndSearch = async () => {
+    const requiredBudget = data?.estimated_cost_inr || calculatedPackageCost || formData.budget_inr;
+    setFormData((prev) => ({ ...prev, budget_inr: requiredBudget.toString() }));
+    
+    setLoading(true);
+    setError(null);
+    try {
+      const payload = {
+        ...formData,
+        budget_inr: parseFloat(requiredBudget),
+        duration_days: parseInt(formData.duration_days, 10) || 1
+      };
+      const res = await fetch(`${API_BASE}/api/v1/plan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) throw new Error(`Server returned HTTP ${res.status}`);
+      const result = await res.json();
+      setData(result);
+      if (result.budget_sufficient === false) setActiveTab('itinerary');
+      else setActiveTab('flights');
+    } catch (err) {
+      setError(err.message || 'Error communicating with AI service.');
+    } finally {
+      setLoading(false);
+    }
+  };
   const handleFileUpload = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
     setOcrLoading(true);
     setOcrError(null);
-
     const body = new FormData();
     body.append('file', file);
-
     try {
-      const res = await fetch(`${API_BASE}/api/v1/ocr/passport`, {
-        method: 'POST',
-        body: body
-      });
+      const res = await fetch(`${API_BASE}/api/v1/ocr/passport`, { method: 'POST', body });
       const resData = await res.json();
-
       if (resData.status === 'success' || resData.passport_verified) {
         setOcrData(resData.passport_details);
-        setFormData(prev => ({
-          ...prev,
-          passport_verified: true,
-          passport_data: resData.passport_details
-        }));
+        setFormData((prev) => ({ ...prev, passport_verified: true, passport_data: resData.passport_details }));
       } else {
-        setOcrError('Could not verify passport. Please upload a clear document image or PDF.');
+        setOcrError('Could not verify passport document.');
       }
     } catch (err) {
-      setOcrError('Passport verification failed. Check server connection.');
+      setOcrError('Passport verification failed.');
     } finally {
       setOcrLoading(false);
     }
   };
 
+  // Robust field reading across all API response signatures
   const rawFlights = data?.flight_options || data?.breakdown?.flights || [];
   const hotels = data?.hotels_options || data?.breakdown?.hotels || [];
   const trains = data?.train_options || data?.breakdown?.trains || [];
   const buses = data?.bus_options || data?.breakdown?.buses || [];
-  const cab = data?.local_cab || data?.breakdown?.local_cabs || {};
+  const cabs = data?.cabs_options || (Array.isArray(data?.breakdown?.cabs) ? data.breakdown.cabs : []);
+  let cab = data?.local_cab || data?.breakdown?.local_cabs || data?.breakdown?.cabs || {};
+  if (Array.isArray(cab)) {
+    cab = cab.length > 0 ? cab[0] : {};
+  }
 
   const tripDays = parseInt(formData.duration_days, 10) || 1;
   const tripNights = Math.max(1, tripDays - 1);
 
   const { outboundFlights, returnFlights } = useMemo(() => {
-    if (!Array.isArray(rawFlights) || rawFlights.length === 0) {
-      return { outboundFlights: [], returnFlights: [] };
-    }
+    if (!Array.isArray(rawFlights) || rawFlights.length === 0) return { outboundFlights: [], returnFlights: [] };
+    if (formData.trip_type === 'one_way') return { outboundFlights: rawFlights, returnFlights: [] };
 
-    if (formData.trip_type === 'one_way') {
-      return { outboundFlights: rawFlights.slice(0, 10), returnFlights: [] };
-    }
+    const out = rawFlights.filter((f) => f && (f.direction === 'outbound' || f.trip_direction === 'outbound'));
+    const ret = rawFlights.filter((f) => f && (f.direction === 'return' || f.direction === 'inbound' || f.trip_direction === 'return'));
 
-    const out = rawFlights.filter(f => f && (f.direction === 'outbound' || f.trip_direction === 'outbound'));
-    const ret = rawFlights.filter(f => f && (f.direction === 'return' || f.direction === 'inbound' || f.trip_direction === 'return'));
-
-    if (out.length > 0 || ret.length > 0) {
-      return {
-        outboundFlights: out.slice(0, 10),
-        returnFlights: ret.slice(0, 10)
-      };
-    }
-
+    if (out.length > 0 || ret.length > 0) return { outboundFlights: out, returnFlights: ret };
     const half = Math.ceil(rawFlights.length / 2);
-    return {
-      outboundFlights: rawFlights.slice(0, half),
-      returnFlights: rawFlights.slice(half)
-    };
+    return { outboundFlights: rawFlights.slice(0, half), returnFlights: rawFlights.slice(half) };
   }, [rawFlights, formData.trip_type]);
 
   const lowestOutboundFlight = useMemo(() => {
     if (!outboundFlights.length) return null;
-    return [...outboundFlights].sort((a, b) => (Number(a?.price_inr) || 0) - (Number(b?.price_inr) || 0))[0] || null;
+    return [...outboundFlights].sort((a, b) => (Number(a?.price_inr) || 0) - (Number(b?.price_inr) || 0))[0];
   }, [outboundFlights]);
 
   const lowestReturnFlight = useMemo(() => {
     if (!returnFlights.length) return null;
-    return [...returnFlights].sort((a, b) => (Number(a?.price_inr) || 0) - (Number(b?.price_inr) || 0))[0] || null;
+    return [...returnFlights].sort((a, b) => (Number(a?.price_inr) || 0) - (Number(b?.price_inr) || 0))[0];
   }, [returnFlights]);
 
   const lowestHotel = useMemo(() => {
     if (!hotels.length) return null;
-    return [...hotels].sort((a, b) => (Number(a?.price_per_night) || 0) - (Number(b?.price_per_night) || 0))[0] || null;
+    return [...hotels].sort((a, b) => (Number(a?.price_per_night) || 0) - (Number(b?.price_per_night) || 0))[0];
   }, [hotels]);
+
+  const lowestCab = useMemo(() => {
+    if (cabs && cabs.length) {
+      return [...cabs].sort((a, b) => (Number(a?.total_cab_cost_inr) || 0) - (Number(b?.total_cab_cost_inr) || 0))[0];
+    }
+    if (cab?.cab_service) {
+      let lowest = { 
+        service_name: cab.cab_service,
+        vehicle_type: cab.vehicle_type,
+        total_cab_cost_inr: cab.total_cab_cost_inr 
+      };
+      if (Array.isArray(cab.alternatives)) {
+        cab.alternatives.forEach(alt => {
+           if (alt.total_cab_cost_inr < lowest.total_cab_cost_inr) lowest = alt;
+        });
+      }
+      return lowest;
+    }
+    return null;
+  }, [cabs, cab]);
 
   const calculatedPackageCost = useMemo(() => {
     let cost = 0;
@@ -220,87 +227,120 @@ export default function TravelPlanner() {
       cost += Number(lowestReturnFlight.price_inr);
     }
     if (lowestHotel?.price_per_night) cost += Number(lowestHotel.price_per_night) * tripNights;
-    if (cab?.total_cab_cost_inr) cost += Number(cab.total_cab_cost_inr);
+    if (lowestCab?.total_cab_cost_inr) cost += Number(lowestCab.total_cab_cost_inr);
 
-    if (cost > 0) return cost;
-    return Number(data?.calculated_cost_inr || data?.estimated_cost_inr || 0);
-  }, [lowestOutboundFlight, lowestReturnFlight, lowestHotel, cab, tripNights, formData.trip_type, data]);
+    return cost > 0 ? cost : Number(data?.calculated_cost_inr || data?.estimated_cost_inr || 0);
+  }, [lowestOutboundFlight, lowestReturnFlight, lowestHotel, lowestCab, tripNights, formData.trip_type, data]);
 
   const currentBudget = parseFloat(formData.budget_inr) || 0;
   const isBudgetShort = calculatedPackageCost > 0 && currentBudget < calculatedPackageCost;
   const isBudgetSufficient = data ? !isBudgetShort && data.budget_sufficient !== false : true;
 
   const handleApplyCalculatedBudget = () => {
-    setFormData(prev => ({
-      ...prev,
-      budget_inr: calculatedPackageCost.toString()
-    }));
+    setFormData((prev) => ({ ...prev, budget_inr: calculatedPackageCost.toString() }));
   };
 
-  // Helper to extract segments or generate fallback connecting route
-  const getFlightSegments = (f, isOutbound) => {
-    if (Array.isArray(f?.segments) && f.segments.length > 0) {
-      return f.segments;
-    }
+  const renderFlightCard = (f, i, isOutbound, lowest) => {
+    const isLowest = lowest?.flight_number === f?.flight_number;
+    const segments = Array.isArray(f?.segments) && f.segments.length > 0 ? f.segments : [];
+    const isDirect = f?.is_direct ?? (segments.length <= 1 && !segments[0]?.layover_after);
 
-    const airlineName = f?.airline || 'Airline';
-    const mainCode = f?.flight_number ? f.flight_number.replace(/[^a-zA-Z0-9]/g, '') : '207';
-    const numOnly = mainCode.replace(/\D/g, '') || '101';
-    const secondNum = (parseInt(numOnly, 10) + 1).toString();
+    return (
+      <div
+        key={i}
+        style={{
+          border: isLowest ? '2px solid #2563eb' : '1px solid #e2e8f0',
+          padding: '16px',
+          borderRadius: '12px',
+          background: isLowest ? '#f8faff' : '#ffffff',
+          boxShadow: '0 2px 4px rgba(0,0,0,0.02)'
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <img
+            src={f?.airline_logo || `https://placehold.co/40x40?text=${(f?.airline || 'FL').slice(0, 2)}`}
+            alt={f?.airline || 'Airline'}
+            style={{ width: '40px', height: '40px', objectFit: 'contain' }}
+            onError={(e) => { e.target.src = 'https://placehold.co/40x40?text=FL'; }}
+          />
+          <div style={{ flex: 1 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: '700' }}>
+              <span>{f?.airline} <small style={{ color: '#64748b', fontWeight: '400' }}>({f?.flight_number})</small></span>
+              <div style={{ textAlign: 'right' }}>
+                <span style={{ color: '#059669', fontSize: '16px' }}>₹{Number(f?.price_inr || 0).toLocaleString()}</span>
+                <div style={{ fontSize: '10px', color: '#64748b', fontWeight: '500' }}>
+                  {isDirect ? 'Direct Non-Stop' : `${segments.length} Legs Connecting`}
+                </div>
+              </div>
+            </div>
+            <div style={{ fontSize: '12px', color: '#475569', marginTop: '4px', display: 'flex', justifyContent: 'space-between' }}>
+              <span>🕒 {extractTime(f?.departure_time)} ➔ {extractTime(f?.arrival_time)} ({f?.total_duration})</span>
+              <span style={{ color: '#2563eb', fontWeight: '600' }}>
+                {isOutbound ? `${formData.origin} ➔ ${formData.destination}` : `${formData.destination} ➔ ${formData.origin}`}
+              </span>
+            </div>
+          </div>
+        </div>
 
-    let hub = 'AUH';
-    if (airlineName.toLowerCase().includes('virgin') || airlineName.toLowerCase().includes('british')) hub = 'LHR';
-    else if (airlineName.toLowerCase().includes('france')) hub = 'CDG';
-    else if (airlineName.toLowerCase().includes('cathay')) hub = 'HKG';
-    else if (airlineName.toLowerCase().includes('thai')) hub = 'BKK';
-    else if (airlineName.toLowerCase().includes('qatar')) hub = 'DOH';
-    else if (airlineName.toLowerCase().includes('klm')) hub = 'AMS';
+        <div style={{ marginTop: '8px', fontSize: '11px', fontWeight: '700' }}>
+          {isDirect ? (
+            <span style={{ color: '#15803d', background: '#dcfce7', padding: '2px 8px', borderRadius: '4px' }}>
+              🟢 Non-Stop Direct Flight
+            </span>
+          ) : (
+            <span style={{ color: '#b45309', background: '#fef3c7', padding: '2px 8px', borderRadius: '4px' }}>
+              🟠 1-Stop Connecting Flight
+            </span>
+          )}
+        </div>
 
-    const routeOrigin = isOutbound ? formData.origin : formData.destination;
-    const routeDest = isOutbound ? formData.destination : formData.origin;
-    const depTime = extractTime(f?.departure_time);
-    const arrTime = extractTime(f?.arrival_time);
+        {segments.length > 0 && (
+          <div style={{ marginTop: '10px', paddingTop: '8px', borderTop: '1px dashed #e2e8f0', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            {segments.map((seg, sIdx) => (
+              <div key={sIdx} style={{ fontSize: '12px', background: '#f8fafc', padding: '6px 10px', borderRadius: '6px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: '600', color: '#1e293b' }}>
+                  <span>✈️ Leg {sIdx + 1}: {seg.airline} ({seg.flight_number})</span>
+                  <span>{seg.from_code} ➔ {seg.to_code}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#64748b', fontSize: '11px', marginTop: '2px' }}>
+                  <span>Dep: {extractTime(seg.departure_time)}</span>
+                  <span>Arr: {extractTime(seg.arrival_time)} {seg.day_shift || ''}</span>
+                </div>
+                {seg.layover_after && (
+                  <div style={{ marginTop: '3px', color: '#d97706', fontWeight: '600', fontSize: '11px' }}>
+                    ⏳ Layover: {seg.layover_after}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
 
-    return [
-      {
-        airline: airlineName,
-        flight_number: f?.flight_number || `${airlineName.slice(0, 2).toUpperCase()} ${numOnly}`,
-        from_code: routeOrigin,
-        to_code: hub,
-        departure_time: depTime,
-        arrival_time: '11:30',
-        layover_after: '3h 15m (Transit & Clearance)'
-      },
-      {
-        airline: airlineName,
-        flight_number: `${airlineName.slice(0, 2).toUpperCase()} ${secondNum}`,
-        from_code: hub,
-        to_code: routeDest,
-        departure_time: '14:45',
-        arrival_time: arrTime,
-        day_shift: isOutbound ? '(Same Day)' : '(+1 Day)'
-      }
-    ];
+        {isLowest && (
+          <div style={{ marginTop: '8px', fontSize: '11px', fontWeight: '700', color: '#2563eb', textTransform: 'uppercase' }}>
+            ⭐ Lowest Fare Option
+          </div>
+        )}
+      </div>
+    );
   };
 
   return (
     <div style={{ maxWidth: '1200px', margin: '0 auto', padding: '24px', fontFamily: 'Inter, system-ui, sans-serif', color: '#0f172a' }}>
       <header style={{ textAlign: 'center', marginBottom: '32px' }}>
-        <h1 style={{ 
-          fontSize: '2.5rem', 
-          fontWeight: '800', 
-          lineHeight: '1.3', 
-          paddingBottom: '8px', 
-          background: 'linear-gradient(to right, #2563eb, #0d9488)', 
-          WebkitBackgroundClip: 'text', 
-          backgroundClip: 'text', 
-          WebkitTextFillColor: 'transparent', 
-          margin: '0 0 8px 0', 
-          display: 'inline-block' 
+        <h1 style={{
+          fontSize: '2.5rem',
+          fontWeight: '800',
+          lineHeight: '1.3',
+          background: 'linear-gradient(to right, #2563eb, #0d9488)',
+          WebkitBackgroundClip: 'text',
+          WebkitTextFillColor: 'transparent',
+          margin: '0 0 8px 0',
+          display: 'inline-block'
         }}>
           TravelAgent AI Engine
         </h1>
-        <p style={{ color: '#64748b', margin: '0px' }}>Autonomous Multi-Modal Travel Itinerary & Budget Package Generator</p>
+        <p style={{ color: '#64748b', margin: '0px' }}>Dynamic Multi-Modal Travel Itinerary & Lowest Cost Package Planner</p>
       </header>
 
       {/* SEARCH FORM */}
@@ -308,96 +348,35 @@ export default function TravelPlanner() {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '16px', marginBottom: '16px' }}>
           <div>
             <label style={{ fontSize: '13px', fontWeight: '600', color: '#475569' }}>User ID</label>
-            <input 
-              name="user_id" 
-              placeholder="e.g. usr_dev_01" 
-              value={formData.user_id} 
-              onChange={handleInputChange} 
-              style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', marginTop: '4px', boxSizing: 'border-box' }}  
-            />
+            <input name="user_id" value={formData.user_id} onChange={handleInputChange} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', marginTop: '4px', boxSizing: 'border-box' }} />
           </div>
-
           <div>
-            <label style={{ fontSize: '13px', fontWeight: '600', color: '#475569' }}>Origin Code</label>
-            <input 
-              name="origin" 
-              placeholder="e.g. BOM" 
-              value={formData.origin} 
-              onChange={handleInputChange} 
-              style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', marginTop: '4px', boxSizing: 'border-box' }} 
-              required 
-            />
+            <label style={{ fontSize: '13px', fontWeight: '600', color: '#475569' }}>Origin</label>
+            <input name="origin" placeholder="e.g. BOM" value={formData.origin} onChange={handleInputChange} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', marginTop: '4px', boxSizing: 'border-box' }} required />
           </div>
-
           <div>
             <label style={{ fontSize: '13px', fontWeight: '600', color: '#475569' }}>Destination</label>
-            <input 
-              name="destination" 
-              placeholder="e.g. LAX" 
-              value={formData.destination} 
-              onChange={handleInputChange} 
-              style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', marginTop: '4px', boxSizing: 'border-box' }} 
-              required 
-            />
+            <input name="destination" placeholder="e.g. LAX or DEL" value={formData.destination} onChange={handleInputChange} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', marginTop: '4px', boxSizing: 'border-box' }} required />
           </div>
-
           <div>
-            <label style={{ fontSize: '13px', fontWeight: '600', color: '#475569' }}>From Date (Start)</label>
-            <input 
-              type="date" 
-              name="from_date" 
-              value={formData.from_date} 
-              onChange={handleInputChange} 
-              style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', marginTop: '4px', boxSizing: 'border-box' }} 
-              required 
-            />
+            <label style={{ fontSize: '13px', fontWeight: '600', color: '#475569' }}>Start Date</label>
+            <input type="date" name="from_date" value={formData.from_date} onChange={handleInputChange} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', marginTop: '4px', boxSizing: 'border-box' }} required />
           </div>
-
           <div>
-            <label style={{ fontSize: '13px', fontWeight: '600', color: '#475569' }}>To Date (End)</label>
-            <input 
-              type="date" 
-              name="to_date" 
-              min={formData.from_date} 
-              value={formData.to_date} 
-              onChange={handleInputChange} 
-              style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', marginTop: '4px', boxSizing: 'border-box' }} 
-              required 
-            />
+            <label style={{ fontSize: '13px', fontWeight: '600', color: '#475569' }}>End Date</label>
+            <input type="date" name="to_date" min={formData.from_date} value={formData.to_date} onChange={handleInputChange} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', marginTop: '4px', boxSizing: 'border-box' }} required />
           </div>
-
           <div>
             <label style={{ fontSize: '13px', fontWeight: '600', color: '#475569' }}>Duration (Days)</label>
-            <input 
-              type="number" 
-              name="duration_days" 
-              value={formData.duration_days} 
-              onChange={handleInputChange} 
-              style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', marginTop: '4px', boxSizing: 'border-box' }} 
-              required 
-            />
+            <input type="number" name="duration_days" value={formData.duration_days} onChange={handleInputChange} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', marginTop: '4px', boxSizing: 'border-box' }} required />
           </div>
-
           <div>
             <label style={{ fontSize: '13px', fontWeight: '600', color: '#475569' }}>Budget (INR ₹)</label>
-            <input 
-              type="number" 
-              name="budget_inr" 
-              value={formData.budget_inr} 
-              onChange={handleInputChange} 
-              style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', marginTop: '4px', boxSizing: 'border-box' }} 
-              required 
-            />
+            <input type="number" name="budget_inr" value={formData.budget_inr} onChange={handleInputChange} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', marginTop: '4px', boxSizing: 'border-box' }} required />
           </div>
-
           <div>
             <label style={{ fontSize: '13px', fontWeight: '600', color: '#475569' }}>Trip Type</label>
-            <select 
-              name="trip_type" 
-              value={formData.trip_type} 
-              onChange={handleInputChange} 
-              style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', marginTop: '4px', boxSizing: 'border-box' }}
-            >
+            <select name="trip_type" value={formData.trip_type} onChange={handleInputChange} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', marginTop: '4px', boxSizing: 'border-box' }}>
               <option value="round_trip">Round Trip</option>
               <option value="one_way">One Way</option>
             </select>
@@ -405,22 +384,12 @@ export default function TravelPlanner() {
         </div>
 
         <div style={{ marginBottom: '16px' }}>
-          <label style={{ fontSize: '13px', fontWeight: '600', color: '#475569' }}>AI Prompt / Specific Preferences</label>
-          <input 
-            name="prompt" 
-            placeholder="e.g. Plan a scenic family trip with authentic food." 
-            value={formData.prompt} 
-            onChange={handleInputChange} 
-            style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', marginTop: '4px', boxSizing: 'border-box' }} 
-          />
+          <label style={{ fontSize: '13px', fontWeight: '600', color: '#475569' }}>Travel Preferences / Prompt</label>
+          <input name="prompt" placeholder="e.g. Scenic views, morning departures, executive travel." value={formData.prompt} onChange={handleInputChange} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', marginTop: '4px', boxSizing: 'border-box' }} />
         </div>
 
-        <button 
-          type="submit" 
-          disabled={loading} 
-          style={{ width: '100%', padding: '14px', background: loading ? '#94a3b8' : 'linear-gradient(to right, #2563eb, #1d4ed8)', color: '#ffffff', fontWeight: '600', border: 'none', borderRadius: '8px', cursor: loading ? 'not-allowed' : 'pointer' }}
-        >
-          {loading ? 'Synthesizing Live Data & Generating Itinerary...' : 'Generate Real-Time Travel Package'}
+        <button type="submit" disabled={loading} style={{ width: '100%', padding: '14px', background: loading ? '#94a3b8' : 'linear-gradient(to right, #2563eb, #1d4ed8)', color: '#ffffff', fontWeight: '600', border: 'none', borderRadius: '8px', cursor: loading ? 'not-allowed' : 'pointer' }}>
+          {loading ? 'Synthesizing Live Dynamic Options via Gemini 3.8 Flash...' : 'Generate Real-Time Travel Package'}
         </button>
       </form>
 
@@ -430,9 +399,7 @@ export default function TravelPlanner() {
       {data && data.is_international && !formData.passport_verified && (
         <div style={{ background: '#fff7ed', border: '1px solid #ffedd5', padding: '24px', borderRadius: '16px', textAlign: 'center', marginBottom: '24px' }}>
           <h3 style={{ margin: '0 0 8px 0', color: '#c2410c' }}>🛂 International Trip: Passport Verification Required</h3>
-          <p style={{ margin: '0 0 16px 0', fontSize: '14px', color: '#9a3412' }}>
-            This trip crosses international borders. Please upload your passport document.
-          </p>
+          <p style={{ margin: '0 0 16px 0', fontSize: '14px', color: '#9a3412' }}>This trip crosses international borders. Please upload your passport document.</p>
           <input type="file" onChange={handleFileUpload} disabled={ocrLoading} style={{ fontSize: '14px' }} />
           {ocrLoading && <p style={{ color: '#ea580c', fontSize: '13px', marginTop: '10px' }}>Verifying document with OCR...</p>}
           {ocrError && <p style={{ color: '#dc2626', fontSize: '13px', marginTop: '10px' }}>{ocrError}</p>}
@@ -442,30 +409,28 @@ export default function TravelPlanner() {
       {/* PASSPORT VERIFIED SUCCESS BADGE */}
       {formData.passport_verified && (
         <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', padding: '14px 18px', borderRadius: '12px', marginBottom: '24px', fontSize: '13px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div>
-            <span style={{ color: '#15803d', fontWeight: '700' }}>Passport Verified ✅</span> — Holder: <strong>{ocrData?.full_name || 'Verified Passenger'}</strong> ({ocrData?.passport_number || 'Valid'})
-          </div>
-          <span style={{ color: '#166534', fontSize: '12px' }}>Ready for International Packages</span>
+          <span style={{ color: '#15803d', fontWeight: '700' }}>Passport Verified ✅ — Passenger: <strong>{ocrData?.full_name || 'Verified Passenger'}</strong></span>
+          <span style={{ color: '#166534', fontSize: '12px' }}>Unlocked International Package</span>
         </div>
       )}
 
-      {/* TRIP DETAILS & PACKAGE VIEW */}
+      {/* MAIN DATA VIEW */}
       {data && (!data.is_international || formData.passport_verified) && (
         <div>
-          {/* TOTAL COST OVERVIEW CARD */}
+          {/* PACKAGE VALUE OVERVIEW */}
           <div style={{ background: '#0f172a', color: '#ffffff', padding: '24px', borderRadius: '16px', display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: '16px', marginBottom: '20px' }}>
             <div>
               <span style={{ fontSize: '13px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                Estimated Package Cost (Lowest Tab Options)
+                Lowest Combined Package Cost
               </span>
               <h2 style={{ margin: '4px 0 0 0', fontSize: '2.2rem', color: isBudgetShort ? '#f87171' : '#38bdf8' }}>
                 ₹{calculatedPackageCost.toLocaleString()}
               </h2>
               <div style={{ fontSize: '13px', color: '#94a3b8', marginTop: '6px' }}>
-                Outbound ({formData.from_date}): ₹{(lowestOutboundFlight?.price_inr || 0).toLocaleString()} | 
-                Return ({formData.to_date}): ₹{(formData.trip_type === 'round_trip' ? (lowestReturnFlight?.price_inr || 0) : 0).toLocaleString()} | 
+                Outbound: ₹{(lowestOutboundFlight?.price_inr || 0).toLocaleString()} | 
+                Return: ₹{(formData.trip_type === 'round_trip' ? (lowestReturnFlight?.price_inr || 0) : 0).toLocaleString()} | 
                 Hotel ({tripNights}N): ₹{((lowestHotel?.price_per_night || 0) * tripNights).toLocaleString()} | 
-                Cab: ₹{(cab?.total_cab_cost_inr || 0).toLocaleString()}
+                Cab: ₹{(lowestCab?.total_cab_cost_inr || 0).toLocaleString()}
               </div>
             </div>
 
@@ -490,47 +455,18 @@ export default function TravelPlanner() {
                     border: 'none',
                     borderRadius: '8px',
                     cursor: 'pointer',
-                    fontSize: '13px',
-                    boxShadow: '0 2px 8px rgba(245, 158, 11, 0.3)'
+                    fontSize: '13px'
                   }}
                 >
-                  ⚡ Update Budget to ₹{calculatedPackageCost.toLocaleString()}
+                  ⚡ Match Budget to ₹{calculatedPackageCost.toLocaleString()}
                 </button>
               )}
             </div>
           </div>
 
-          {/* INSUFFICIENT BUDGET ALERT */}
-          {isBudgetShort && (
-            <div style={{ background: '#fef2f2', border: '1px solid #fecaca', padding: '16px 20px', borderRadius: '12px', marginBottom: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div>
-                <strong style={{ color: '#b91c1c' }}>⚠️ Budget is less than minimum package estimate:</strong>
-                <div style={{ color: '#991b1b', fontSize: '14px', marginTop: '2px' }}>
-                  Cheapest options require at least ₹{calculatedPackageCost.toLocaleString()} (Short by ₹{(calculatedPackageCost - currentBudget).toLocaleString()}).
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={handleApplyCalculatedBudget}
-                style={{
-                  background: '#dc2626',
-                  color: '#ffffff',
-                  border: 'none',
-                  padding: '8px 14px',
-                  borderRadius: '6px',
-                  fontWeight: '600',
-                  fontSize: '13px',
-                  cursor: 'pointer'
-                }}
-              >
-                Apply ₹{calculatedPackageCost.toLocaleString()}
-              </button>
-            </div>
-          )}
-
-          {/* NAVIGATION TABS , 'history'*/}
+          {/* TABS HEADER */}
           <div style={{ display: 'flex', gap: '8px', borderBottom: '2px solid #e2e8f0', marginBottom: '20px', overflowX: 'auto' }}>
-            {['flights', 'hotels', 'trains', 'buses', 'cabs', 'itinerary'].map((tab) => (
+            {['flights', 'hotels', 'trains', 'buses', 'cabs', 'itinerary', 'history'].map((tab) => (
               <button
                 key={tab}
                 onClick={() => {
@@ -555,251 +491,121 @@ export default function TravelPlanner() {
             ))}
           </div>
 
-          {/* FLIGHTS TAB WITH CONNECTING FLIGHT DETAILS */}
+          {/* FLIGHTS TAB */}
           {activeTab === 'flights' && isBudgetSufficient && (
             <div>
               {formData.trip_type === 'round_trip' ? (
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(350px, 1fr))', gap: '24px' }}>
-                  
-                  {/* OUTBOUND FLIGHTS */}
                   <div>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '14px' }}>
-                      <h3 style={{ margin: 0, fontSize: '17px', color: '#1e40af', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        🛫 Outbound Flights ({formData.from_date})
-                      </h3>
-                      <span style={{ fontSize: '12px', fontWeight: '600', color: '#64748b', background: '#f1f5f9', padding: '3px 8px', borderRadius: '6px' }}>
-                        Showing {outboundFlights.length} options
-                      </span>
+                      <h3 style={{ margin: 0, fontSize: '17px', color: '#1e40af' }}>🛫 Outbound Flights ({formData.from_date})</h3>
+                      <span style={{ fontSize: '12px', fontWeight: '600', color: '#64748b' }}>Showing {outboundFlights.length} options</span>
                     </div>
-
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                      {outboundFlights.length === 0 ? (
-                        <p style={{ color: '#64748b' }}>No outbound flights found for {formData.from_date}.</p>
-                      ) : (
-                        outboundFlights.map((f, i) => {
-                          const isLowest = lowestOutboundFlight?.flight_number === f?.flight_number;
-                          const segments = getFlightSegments(f, true);
-
-                          return (
-                            <div 
-                              key={i} 
-                              style={{ 
-                                border: isLowest ? '2px solid #2563eb' : '1px solid #e2e8f0', 
-                                padding: '16px', 
-                                borderRadius: '12px', 
-                                background: isLowest ? '#f8faff' : '#ffffff',
-                                boxShadow: '0 2px 4px rgba(0,0,0,0.02)'
-                              }}
-                            >
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                                <img 
-                                  src={f?.airline_logo} 
-                                  alt={f?.airline || 'Flight'} 
-                                  style={{ width: '40px', height: '40px', objectFit: 'contain' }} 
-                                  onError={(e) => { e.target.src = 'https://placehold.co/40x40?text=Flight'; }} 
-                                />
-                                <div style={{ flex: 1 }}>
-                                  <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: '700' }}>
-                                    <span>{f?.airline} <small style={{ color: '#64748b', fontWeight: '400' }}>({f?.flight_number || `OB-${i+1}`})</small></span>
-                                    <div style={{ textAlign: 'right' }}>
-                                      <span style={{ color: '#059669', fontSize: '16px' }}>₹{Number(f?.price_inr || 0).toLocaleString()}</span>
-                                      <div style={{ fontSize: '10px', color: '#64748b', fontWeight: '500' }}>All connecting legs included</div>
-                                    </div>
-                                  </div>
-                                  <div style={{ fontSize: '12px', color: '#475569', marginTop: '4px', display: 'flex', justifyContent: 'space-between' }}>
-                                    <span>🕒 {formData.from_date} {extractTime(f?.departure_time)} ➔ {extractTime(f?.arrival_time)}</span>
-                                    <span style={{ color: '#2563eb', fontWeight: '600' }}>{formData.origin} ➔ {formData.destination}</span>
-                                  </div>
-                                </div>
-                              </div>
-
-                              {/* CONNECTING FLIGHT LEGS */}
-                              <div style={{ marginTop: '12px', paddingTop: '10px', borderTop: '1px dashed #e2e8f0', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                                {segments.map((seg, sIdx) => (
-                                  <div key={sIdx} style={{ fontSize: '12px', background: '#f8fafc', padding: '6px 10px', borderRadius: '6px' }}>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: '600', color: '#1e293b' }}>
-                                      <span>✈️ Leg {sIdx + 1}: {seg.airline} ({seg.flight_number})</span>
-                                      <span style={{ color: '#475569' }}>{seg.from_code} ➔ {seg.to_code}</span>
-                                    </div>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', color: '#64748b', fontSize: '11px', marginTop: '2px' }}>
-                                      <span>Dep: {formData.from_date} {extractTime(seg.departure_time)}</span>
-                                      <span>Arr: {extractTime(seg.arrival_time)} {seg.day_shift || ''}</span>
-                                    </div>
-                                    {seg.layover_after && (
-                                      <div style={{ marginTop: '3px', color: '#d97706', fontWeight: '600', fontSize: '11px' }}>
-                                        ⏳ Layover: {seg.layover_after}
-                                      </div>
-                                    )}
-                                  </div>
-                                ))}
-                              </div>
-
-                              {isLowest && (
-                                <div style={{ marginTop: '8px', fontSize: '11px', fontWeight: '700', color: '#2563eb', textTransform: 'uppercase' }}>
-                                  ⭐ Lowest Outbound Fare
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })
-                      )}
+                      {outboundFlights.map((f, i) => renderFlightCard(f, i, true, lowestOutboundFlight))}
                     </div>
                   </div>
 
-                  {/* RETURN FLIGHTS */}
                   <div>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '14px' }}>
-                      <h3 style={{ margin: 0, fontSize: '17px', color: '#0f766e', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        🛬 Return Flights ({formData.to_date})
-                      </h3>
-                      <span style={{ fontSize: '12px', fontWeight: '600', color: '#64748b', background: '#f1f5f9', padding: '3px 8px', borderRadius: '6px' }}>
-                        Showing {returnFlights.length} options
-                      </span>
+                      <h3 style={{ margin: 0, fontSize: '17px', color: '#0f766e' }}>🛬 Return Flights ({formData.to_date})</h3>
+                      <span style={{ fontSize: '12px', fontWeight: '600', color: '#64748b' }}>Showing {returnFlights.length} options</span>
                     </div>
-
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                      {returnFlights.length === 0 ? (
-                        <p style={{ color: '#64748b' }}>No return flights found for {formData.to_date}.</p>
-                      ) : (
-                        returnFlights.map((f, i) => {
-                          const isLowest = lowestReturnFlight?.flight_number === f?.flight_number;
-                          const segments = getFlightSegments(f, false);
-
-                          return (
-                            <div 
-                              key={i} 
-                              style={{ 
-                                border: isLowest ? '2px solid #0d9488' : '1px solid #e2e8f0', 
-                                padding: '16px', 
-                                borderRadius: '12px', 
-                                background: isLowest ? '#f0fdfa' : '#ffffff',
-                                boxShadow: '0 2px 4px rgba(0,0,0,0.02)'
-                              }}
-                            >
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                                <img 
-                                  src={f?.airline_logo} 
-                                  alt={f?.airline || 'Flight'} 
-                                  style={{ width: '40px', height: '40px', objectFit: 'contain' }} 
-                                  onError={(e) => { e.target.src = 'https://placehold.co/40x40?text=Flight'; }} 
-                                />
-                                <div style={{ flex: 1 }}>
-                                  <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: '700' }}>
-                                    <span>{f?.airline} <small style={{ color: '#64748b', fontWeight: '400' }}>({f?.flight_number || `RT-${i+1}`})</small></span>
-                                    <div style={{ textAlign: 'right' }}>
-                                      <span style={{ color: '#059669', fontSize: '16px' }}>₹{Number(f?.price_inr || 0).toLocaleString()}</span>
-                                      <div style={{ fontSize: '10px', color: '#64748b', fontWeight: '500' }}>All connecting legs included</div>
-                                    </div>
-                                  </div>
-                                  <div style={{ fontSize: '12px', color: '#475569', marginTop: '4px', display: 'flex', justifyContent: 'space-between' }}>
-                                    <span>🕒 {formData.to_date} {extractTime(f?.departure_time)} ➔ {extractTime(f?.arrival_time)}</span>
-                                    <span style={{ color: '#0d9488', fontWeight: '600' }}>{formData.destination} ➔ {formData.origin}</span>
-                                  </div>
-                                </div>
-                              </div>
-
-                              {/* RETURN CONNECTING FLIGHT LEGS */}
-                              <div style={{ marginTop: '12px', paddingTop: '10px', borderTop: '1px dashed #e2e8f0', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                                {segments.map((seg, sIdx) => (
-                                  <div key={sIdx} style={{ fontSize: '12px', background: '#f8fafc', padding: '6px 10px', borderRadius: '6px' }}>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: '600', color: '#1e293b' }}>
-                                      <span>✈️ Leg {sIdx + 1}: {seg.airline} ({seg.flight_number})</span>
-                                      <span style={{ color: '#475569' }}>{seg.from_code} ➔ {seg.to_code}</span>
-                                    </div>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', color: '#64748b', fontSize: '11px', marginTop: '2px' }}>
-                                      <span>Dep: {formData.to_date} {extractTime(seg.departure_time)}</span>
-                                      <span>Arr: {extractTime(seg.arrival_time)} {seg.day_shift || ''}</span>
-                                    </div>
-                                    {seg.layover_after && (
-                                      <div style={{ marginTop: '3px', color: '#d97706', fontWeight: '600', fontSize: '11px' }}>
-                                        ⏳ Layover: {seg.layover_after}
-                                      </div>
-                                    )}
-                                  </div>
-                                ))}
-                              </div>
-
-                              {isLowest && (
-                                <div style={{ marginTop: '8px', fontSize: '11px', fontWeight: '700', color: '#0d9488', textTransform: 'uppercase' }}>
-                                  ⭐ Lowest Return Fare
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })
-                      )}
+                      {returnFlights.map((f, i) => renderFlightCard(f, i, false, lowestReturnFlight))}
                     </div>
                   </div>
-
                 </div>
               ) : (
-                /* ONE WAY FLIGHTS */
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '16px' }}>
-                  {outboundFlights.map((f, i) => {
-                    const segments = getFlightSegments(f, true);
-                    return (
-                      <div key={i} style={{ border: '1px solid #e2e8f0', padding: '16px', borderRadius: '12px', background: '#fff' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
-                          <img src={f?.airline_logo} alt={f?.airline} style={{ width: '42px', height: '42px', objectFit: 'contain', borderRadius: '6px' }} onError={(e) => { e.target.src = 'https://placehold.co/48x48?text=Flight'; }} />
-                          <div style={{ flex: 1 }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: '700' }}>
-                              <span>{f?.airline}</span>
-                              <span style={{ color: '#059669' }}>₹{Number(f?.price_inr || 0).toLocaleString()}</span>
-                            </div>
-                            <div style={{ fontSize: '13px', color: '#64748b', marginTop: '4px' }}>
-                              🕒 {formData.from_date} {extractTime(f?.departure_time)} ➔ {extractTime(f?.arrival_time)}
-                            </div>
-                          </div>
-                        </div>
-                        <div style={{ marginTop: '10px', paddingTop: '8px', borderTop: '1px dashed #e2e8f0', fontSize: '12px', color: '#475569' }}>
-                          <span>Includes connection at {segments[0]?.to_code || 'Transit Hub'}</span>
-                        </div>
-                      </div>
-                    );
-                  })}
+                  {outboundFlights.map((f, i) => renderFlightCard(f, i, true, lowestOutboundFlight))}
                 </div>
               )}
             </div>
           )}
 
-          {/* HOTELS */}
+          {/* HOTELS TAB (12 Options) */}
           {activeTab === 'hotels' && isBudgetSufficient && (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '20px' }}>
-              {hotels.length === 0 ? <p style={{ color: '#64748b' }}>No hotel options retrieved.</p> : hotels.map((h, i) => (
-                <div key={i} style={{ border: lowestHotel?.name === h?.name ? '2px solid #2563eb' : '1px solid #e2e8f0', borderRadius: '12px', overflow: 'hidden', background: '#fff', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.05)' }}>
-                  <img src={h?.image_url} alt={h?.name} style={{ width: '100%', height: '170px', objectFit: 'cover' }} onError={(e) => { e.target.src = 'https://images.unsplash.com/photo-1566073771259-6a8506099945?w=500&auto=format&fit=crop&q=60'; }} />
-                  <div style={{ padding: '16px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                      <h4 style={{ margin: 0, fontSize: '15px', fontWeight: '700' }}>{h?.name}</h4>
-                      <span style={{ color: '#059669', fontWeight: '700' }}>₹{Number(h?.price_per_night || 0).toLocaleString()}/night</span>
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                <h3 style={{ margin: 0, fontSize: '18px', color: '#0f172a' }}>🏨 Accommodations in {formData.destination}</h3>
+                <span style={{ fontSize: '12px', fontWeight: '600', color: '#64748b', background: '#f1f5f9', padding: '4px 10px', borderRadius: '6px' }}>
+                  Showing {hotels.length} verified options ({tripNights} Nights)
+                </span>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '20px' }}>
+                {hotels.map((h, i) => {
+                  const isLowest = lowestHotel?.name === h?.name;
+                  return (
+                    <div
+                      key={i}
+                      style={{
+                        border: isLowest ? '2px solid #2563eb' : '1px solid #e2e8f0',
+                        borderRadius: '12px',
+                        overflow: 'hidden',
+                        background: '#fff',
+                        boxShadow: '0 4px 6px -1px rgba(0,0,0,0.05)',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        justifyContent: 'space-between'
+                      }}
+                    >
+                      <img
+                        src={h?.image_url || 'https://images.unsplash.com/photo-1566073771259-6a8506099945?w=500&auto=format&fit=crop&q=60'}
+                        alt={h?.name}
+                        style={{ width: '100%', height: '160px', objectFit: 'cover' }}
+                        onError={(e) => { e.target.src = 'https://images.unsplash.com/photo-1566073771259-6a8506099945?w=500&auto=format&fit=crop&q=60'; }}
+                      />
+                      <div style={{ padding: '16px', flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                        <div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '6px' }}>
+                            <h4 style={{ margin: 0, fontSize: '15px', fontWeight: '700' }}>{h?.name}</h4>
+                            <span style={{ color: '#059669', fontWeight: '700', fontSize: '15px' }}>₹{Number(h?.price_per_night || 0).toLocaleString()}</span>
+                          </div>
+                          <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '8px' }}>
+                            ⭐ {h?.rating || '4.3'} Rating • <small>₹{(Number(h?.price_per_night || 0) * tripNights).toLocaleString()} total</small>
+                          </div>
+                          <div style={{ fontSize: '11px', color: '#475569', background: '#f8fafc', padding: '6px 8px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
+                            {h?.amenities || 'WiFi, Breakfast, Concierge'}
+                          </div>
+                        </div>
+                        {isLowest && (
+                          <div style={{ marginTop: '10px', fontSize: '11px', fontWeight: '700', color: '#2563eb', textTransform: 'uppercase' }}>
+                            ⭐ Lowest Nightly Rate
+                          </div>
+                        )}
+                      </div>
                     </div>
-                    <div style={{ fontSize: '13px', color: '#64748b' }}>⭐ {h?.rating || '4.2'} Rating</div>
-                  </div>
-                </div>
-              ))}
+                  );
+                })}
+              </div>
             </div>
           )}
 
-          {/* TRAINS */}
+          {/* TRAINS TAB */}
           {activeTab === 'trains' && isBudgetSufficient && (
             <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                <h3 style={{ margin: 0, fontSize: '18px', color: '#0f172a' }}>🚆 Direct Train Routes ({formData.origin} ➔ {formData.destination})</h3>
+                <span style={{ fontSize: '12px', fontWeight: '600', color: '#64748b' }}>Showing {trains.length} options</span>
+              </div>
               {trains.length === 0 ? (
-                <p style={{ color: '#64748b' }}>No direct train options found for this route (International/Flights only).</p>
+                <p style={{ color: '#64748b' }}>No direct train routes found for this itinerary (Flight travel route).</p>
               ) : (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '16px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '16px' }}>
                   {trains.map((t, i) => (
-                    <div key={i} style={{ border: '1px solid #e2e8f0', padding: '18px', borderRadius: '12px', background: '#fff' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                    <div key={i} style={{ border: '1px solid #e2e8f0', padding: '16px', borderRadius: '12px', background: '#fff' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                         <div>
                           <span style={{ fontSize: '11px', fontWeight: '700', padding: '2px 8px', borderRadius: '6px', background: '#e0e7ff', color: '#3730a3', textTransform: 'uppercase' }}>
-                            {t?.class_tier || 'IRCTC'}
+                            {t?.class_tier}
                           </span>
-                          <h4 style={{ margin: '6px 0 0 0', fontSize: '15px', color: '#0f172a' }}>{t?.train_name}</h4>
+                          <h4 style={{ margin: '6px 0 0 0', fontSize: '15px' }}>{t?.train_name} <small>({t?.train_number})</small></h4>
                         </div>
                         <span style={{ color: '#059669', fontWeight: '800', fontSize: '16px' }}>₹{Number(t?.total_price_inr || 0).toLocaleString()}</span>
                       </div>
                       <div style={{ fontSize: '12px', color: '#64748b', marginTop: '10px', display: 'flex', justifyContent: 'space-between' }}>
-                        <span>🕒 {t?.departure_time || 'Dep'} ➔ {t?.arrival_time || 'Arr'}</span>
+                        <span>🕒 {t?.departure_time} ➔ {t?.arrival_time}</span>
                         <span>⏱️ {t?.duration}</span>
                       </div>
                     </div>
@@ -809,26 +615,30 @@ export default function TravelPlanner() {
             </div>
           )}
 
-          {/* BUSES */}
+          {/* BUSES TAB */}
           {activeTab === 'buses' && isBudgetSufficient && (
             <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                <h3 style={{ margin: 0, fontSize: '18px', color: '#0f172a' }}>🚌 Intercity Bus Services ({formData.origin} ➔ {formData.destination})</h3>
+                <span style={{ fontSize: '12px', fontWeight: '600', color: '#64748b' }}>Showing {buses.length} options</span>
+              </div>
               {buses.length === 0 ? (
-                <p style={{ color: '#64748b' }}>No bus services available on this route.</p>
+                <p style={{ color: '#64748b' }}>No intercity bus routes available for this route (Flight travel route).</p>
               ) : (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '16px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '16px' }}>
                   {buses.map((b, i) => (
-                    <div key={i} style={{ border: '1px solid #e2e8f0', padding: '18px', borderRadius: '12px', background: '#fff' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                    <div key={i} style={{ border: '1px solid #e2e8f0', padding: '16px', borderRadius: '12px', background: '#fff' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                         <div>
                           <span style={{ fontSize: '11px', fontWeight: '700', padding: '2px 8px', borderRadius: '6px', background: '#fef3c7', color: '#92400e' }}>
-                            {b?.bus_type || 'AC Sleeper'}
+                            {b?.bus_type}
                           </span>
-                          <h4 style={{ margin: '6px 0 0 0', fontSize: '15px', color: '#0f172a' }}>{b?.bus_operator}</h4>
+                          <h4 style={{ margin: '6px 0 0 0', fontSize: '15px' }}>{b?.bus_operator}</h4>
                         </div>
                         <span style={{ color: '#059669', fontWeight: '800', fontSize: '16px' }}>₹{Number(b?.total_price_inr || 0).toLocaleString()}</span>
                       </div>
                       <div style={{ fontSize: '12px', color: '#64748b', marginTop: '10px', display: 'flex', justifyContent: 'space-between' }}>
-                        <span>🕒 {b?.departure_time || 'Dep'} ➔ {b?.arrival_time || 'Arr'}</span>
+                        <span>🕒 {b?.departure_time} ➔ {b?.arrival_time}</span>
                         <span>⏱️ {b?.duration}</span>
                       </div>
                     </div>
@@ -939,98 +749,63 @@ export default function TravelPlanner() {
               })()}
             </div>
           )}
+          
+           
 
-          {/* ITINERARY */}
+          {/* ITINERARY TAB */}
           {activeTab === 'itinerary' && (
             <div style={{ background: '#f8fafc', padding: '24px', borderRadius: '12px', border: '1px solid #e2e8f0', lineHeight: '1.6' }}>
               <ReactMarkdown remarkPlugins={[remarkGfm]}>
                 {data.itinerary || data.draft_itinerary || 'No itinerary generated.'}
               </ReactMarkdown>
+              {!isBudgetSufficient && (
+                <div style={{ display: 'flex', justifyContent: 'center', marginTop: '30px' }}>
+                  <button 
+                    onClick={handleUpdateBudgetAndSearch}
+                    disabled={loading}
+                    style={{ 
+                      padding: '14px 28px', 
+                      background: '#2563eb', 
+                      color: 'white', 
+                      border: 'none', 
+                      borderRadius: '8px', 
+                      fontSize: '16px', 
+                      fontWeight: 'bold', 
+                      cursor: loading ? 'not-allowed' : 'pointer',
+                      boxShadow: '0 4px 6px -1px rgba(37, 99, 235, 0.2)'
+                    }}
+                  >
+                    {loading ? 'Recalculating...' : `Match Budget (₹${Number(data?.estimated_cost_inr || calculatedPackageCost).toLocaleString()}) & Continue`}
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
-          {/* DETAILED HISTORY TAB */}
+          {/* HISTORY TAB */}
           {activeTab === 'history' && (
             <div>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-                <h3 style={{ margin: 0, fontSize: '18px', color: '#0f172a' }}>Saved Search Records for {formData.user_id}</h3>
-                <button 
-                  onClick={fetchHistory} 
-                  disabled={historyLoading}
-                  style={{ padding: '6px 14px', background: '#f1f5f9', border: '1px solid #cbd5e1', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: '600' }}
-                >
-                  {historyLoading ? 'Refreshing...' : '🔄 Refresh History'}
+                <h3 style={{ margin: 0, fontSize: '18px' }}>Saved Search Records for {formData.user_id}</h3>
+                <button onClick={fetchHistory} disabled={historyLoading} style={{ padding: '6px 14px', background: '#f1f5f9', border: '1px solid #cbd5e1', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: '600' }}>
+                  {historyLoading ? 'Loading...' : '🔄 Refresh'}
                 </button>
               </div>
-
-              {historyError && (
-                <div style={{ padding: '12px', background: '#fef2f2', border: '1px solid #fecaca', color: '#dc2626', borderRadius: '8px', marginBottom: '16px', fontSize: '13px' }}>
-                  {historyError}
-                </div>
-              )}
-
-              {historyLoading ? (
-                <p style={{ color: '#64748b' }}>Loading historical packages from database...</p>
-              ) : history.length === 0 ? (
-                <div style={{ padding: '32px', textAlign: 'center', background: '#f8fafc', borderRadius: '12px', border: '1px dashed #cbd5e1', color: '#64748b' }}>
-                  No saved history found for <strong>{formData.user_id}</strong>. Click Generate above to create a record!
-                </div>
+              {history.length === 0 ? (
+                <p style={{ color: '#64748b' }}>No saved search records found.</p>
               ) : (
-                <div style={{ display: 'grid', gap: '20px' }}>
-                  {history.map((item, idx) => {
-                    const cost = Number(item.estimated_cost || item.calculated_cost_inr || item.total_cost || 0);
-                    const breakdown = item.breakdown || {};
-                    const histFlights = item.flight_options || breakdown.flights || [];
-                    const histHotels = item.hotels_options || breakdown.hotels || [];
-
-                    return (
-                      <div key={idx} style={{ border: '1px solid #cbd5e1', padding: '20px', borderRadius: '14px', background: '#ffffff', boxShadow: '0 4px 6px rgba(0,0,0,0.03)' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', borderBottom: '1px solid #f1f5f9', paddingBottom: '12px', marginBottom: '12px' }}>
-                          <div>
-                            <span style={{ fontSize: '11px', fontWeight: '700', padding: '3px 8px', borderRadius: '6px', background: '#dbeafe', color: '#1d4ed8' }}>
-                              Trip Record #{idx + 1}
-                            </span>
-                            <h4 style={{ margin: '8px 0 2px 0', fontSize: '16px', color: '#0f172a' }}>
-                              {item.origin || formData.origin} ➔ {item.destination || formData.destination}
-                            </h4>
-                            <p style={{ margin: 0, fontSize: '13px', color: '#64748b' }}>
-                              <strong>Dates:</strong> {item.from_date || item.start_date || 'N/A'} to {item.to_date || item.end_date || 'N/A'} ({item.duration_days || 3} Days)
-                            </p>
-                          </div>
-                          <div style={{ textAlign: 'right' }}>
-                            <span style={{ color: '#059669', fontWeight: '800', fontSize: '18px' }}>
-                              ₹{cost.toLocaleString()}
-                            </span>
-                            <div style={{ fontSize: '12px', color: '#64748b' }}>Total Estimated Cost</div>
-                          </div>
-                        </div>
-
-                        <div style={{ background: '#f8fafc', padding: '10px 14px', borderRadius: '8px', fontSize: '13px', color: '#334155', marginBottom: '14px', border: '1px solid #e2e8f0' }}>
-                          💬 <strong>Prompt / Preferences:</strong> "{item.prompt || item.user_input || 'Standard package'}"
-                        </div>
-
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '10px', marginBottom: '14px', fontSize: '12px' }}>
-                          <div style={{ background: '#eff6ff', padding: '10px', borderRadius: '8px', color: '#1e40af' }}>
-                            ✈️ <strong>Flight Selection:</strong> {histFlights[0]?.airline ? `${histFlights[0].airline} (₹${Number(histFlights[0].price_inr).toLocaleString()})` : 'Included in Package'}
-                          </div>
-                          <div style={{ background: '#f0fdf4', padding: '10px', borderRadius: '8px', color: '#166534' }}>
-                            🏨 <strong>Hotel Selection:</strong> {histHotels[0]?.name ? `${histHotels[0].name} (₹${Number(histHotels[0].price_per_night).toLocaleString()}/N)` : 'Standard City Hotel'}
-                          </div>
-                        </div>
-
-                        <details style={{ marginTop: '10px' }}>
-                          <summary style={{ cursor: 'pointer', fontWeight: '600', color: '#2563eb', fontSize: '13px' }}>
-                            View Generated Day-by-Day Itinerary ▾
-                          </summary>
-                          <div style={{ maxHeight: '240px', overflowY: 'auto', background: '#f8fafc', padding: '14px', borderRadius: '8px', border: '1px solid #e2e8f0', fontSize: '13px', lineHeight: '1.6', marginTop: '8px' }}>
-                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                              {item.itinerary || item.draft_itinerary || 'No detailed markdown itinerary recorded.'}
-                            </ReactMarkdown>
-                          </div>
-                        </details>
+                <div style={{ display: 'grid', gap: '14px' }}>
+                  {history.map((h, i) => (
+                    <div key={i} style={{ border: '1px solid #e2e8f0', padding: '16px', borderRadius: '10px', background: '#fff' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <strong>{h.origin} ➔ {h.destination}</strong>
+                        <span style={{ color: '#059669', fontWeight: '700' }}>₹{Number(h.calculated_cost_inr || h.total_cost || 0).toLocaleString()}</span>
                       </div>
-                    );
-                  })}
+                      <div style={{ fontSize: '12px', color: '#64748b', marginTop: '4px' }}>
+                        {h.from_date} to {h.to_date} ({h.duration_days} Days)
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>

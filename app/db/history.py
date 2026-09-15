@@ -8,25 +8,28 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS history (
+        CREATE TABLE IF NOT EXISTS history_v2 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id TEXT,
-            user_input TEXT,
-            itinerary TEXT,
-            estimated_cost REAL,
+            origin TEXT,
+            destination TEXT,
+            from_date TEXT,
+            to_date TEXT,
+            duration_days INTEGER,
+            calculated_cost_inr REAL,
             timestamp TEXT
         )
     """)
     conn.commit()
     conn.close()
 
-def save_chat(user_id: str, prompt: str, itinerary: str, cost: float):
+def save_chat(user_id: str, origin: str, destination: str, from_date: str, to_date: str, duration_days: int, cost: float):
     """Save a chat turn to the database."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO history (user_id, user_input, itinerary, estimated_cost, timestamp) VALUES (?, ?, ?, ?, ?)",
-        (user_id, prompt, itinerary, cost, datetime.now().isoformat())
+        "INSERT INTO history_v2 (user_id, origin, destination, from_date, to_date, duration_days, calculated_cost_inr, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (user_id, origin, destination, from_date, to_date, duration_days, cost, datetime.now().isoformat())
     )
     conn.commit()
     conn.close()
@@ -34,11 +37,12 @@ def save_chat(user_id: str, prompt: str, itinerary: str, cost: float):
 def get_history(user_id: str):
     """Retrieve history records for a given user ID."""
     conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute("SELECT user_input, itinerary, estimated_cost, timestamp FROM history WHERE user_id = ? ORDER BY id DESC", (user_id,))
+    cursor.execute("SELECT * FROM history_v2 WHERE user_id = ? ORDER BY id DESC", (user_id,))
     rows = cursor.fetchall()
     conn.close()
-    return rows
+    return [dict(row) for row in rows]
 
 # Run table initialization on import
 init_db()
