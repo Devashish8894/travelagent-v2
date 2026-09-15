@@ -24,6 +24,10 @@ load_dotenv()
 
 app = FastAPI(title="TravelAgent AI API", version="2.0")
 
+origins = [
+    "https://travelagent-v2.vercel.app",
+]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
